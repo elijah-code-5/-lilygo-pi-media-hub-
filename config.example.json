@@ -1,0 +1,18 @@
+{
+  "host": "0.0.0.0",
+  "port": 8765,
+  "media_root": "/srv/media",
+  "catalog": [
+    {
+      "id": "library",
+      "name": "Media library",
+      "description": "Browse and stream files from the configured media folder.",
+      "url": "/"
+    }
+  ],
+  "ai": {
+    "enabled": false,
+    "endpoint": "",
+    "timeout_seconds": 30
+  }
+}

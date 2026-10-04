@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pi-media-hub"
+version = "0.1.0"
+description = "A small LAN media server and Raspberry Pi setup utility"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[project.scripts]
+pi-media-hub = "pi_media_hub.server:main"
+pi-media-hub-setup = "pi_media_hub.setup:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
