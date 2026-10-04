@@ -37,9 +37,12 @@ sudoedit /etc/pi-media-hub/config.json
 sudo systemctl daemon-reload
 sudo systemctl enable --now pi-media-hub
 systemctl status pi-media-hub
+curl http://127.0.0.1:8765/health
 ```
 
-The setup utility copies the Python server to `/opt/pi-media-hub`, keeps an existing config rather than overwriting it, and writes a systemd service. It prints systemd commands but does not execute them. Review the generated unit and configuration before starting the service. The server runs as the selected unprivileged service user.
+The setup utility copies the Python server to `/opt/pi-media-hub`, keeps an existing config rather than overwriting it, and writes a systemd service. It prints systemd commands but does not execute them. Review the generated unit and configuration before starting the service. The server runs as the selected unprivileged service user. If updating an earlier install, rerun the installer with the replacement AppImage; it refreshes the server package and unit while preserving your configuration.
+
+If an older install's journal says `No module named pi_media_hub.__main__`, update the installed package and service using the replacement AppImage. As a temporary service-only workaround, write a systemd drop-in that replaces `ExecStart` with `/usr/bin/python3 -m pi_media_hub.server --config /etc/pi-media-hub/config.json`, then run `sudo systemctl daemon-reload` and `sudo systemctl restart pi-media-hub`.
 
 ## AppImages
 

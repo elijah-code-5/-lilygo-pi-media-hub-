@@ -1,5 +1,8 @@
 import json
 import getpass
+import os
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -96,9 +99,28 @@ class SetupTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(json.loads(config_path.read_text())["media_root"], "/existing")
             self.assertTrue((root / "opt/lib/pi_media_hub/server.py").is_file())
+            self.assertTrue((root / "opt/lib/pi_media_hub/__main__.py").is_file())
             unit = (root / "systemd/pi-media-hub.service").read_text()
             self.assertIn("User={}".format(getpass.getuser()), unit)
-            self.assertIn("ExecStart=/usr/bin/python3 -m pi_media_hub", unit)
+            self.assertIn("ExecStart=/usr/bin/python3 -m pi_media_hub.server", unit)
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(root / "opt/lib")
+            result = subprocess.run(
+                [sys.executable, "-m", "pi_media_hub.server", "--help"],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run(
+                [sys.executable, "-m", "pi_media_hub", "--help"],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
             new_config_dir = root / "new-etc"
             setup_main([

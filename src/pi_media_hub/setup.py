@@ -35,6 +35,12 @@ def _install(args: argparse.Namespace) -> int:
     source_package = resource_root / "pi_media_hub"
     if not source_package.is_dir():
         source_package = Path(__file__).resolve().parent
+    required_modules = ("__init__.py", "__main__.py", "server.py")
+    missing_modules = [name for name in required_modules if not (source_package / name).is_file()]
+    if missing_modules:
+        raise FileNotFoundError(
+            f"Bundled server package is incomplete at {source_package}: {', '.join(missing_modules)}"
+        )
     sample_config = resource_root / "share" / "pi-media-hub" / "config.example.json"
     if not sample_config.is_file():
         sample_config = resource_root / "config.example.json"
@@ -61,7 +67,7 @@ Wants=network-online.target
 Type=simple
 User={args.service_user}
 Environment=PYTHONPATH={prefix / "lib"}
-ExecStart=/usr/bin/python3 -m pi_media_hub --config {config_path}
+ExecStart=/usr/bin/python3 -m pi_media_hub.server --config {config_path}
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
