@@ -599,6 +599,17 @@ class MediaHubHandler(BaseHTTPRequestHandler):
         if kind not in {"all", "audio", "video", "podcast"}:
             self._send_json(400, {"error": "kind must be all, audio, video, or podcast"})
             return
+        try:
+            limit = int(query.get("limit", [str(MAX_LIBRARY_ITEMS)])[0])
+            offset = int(query.get("offset", ["0"])[0])
+        except ValueError:
+            self._send_json(400, {"error": "limit and offset must be integers"})
+            return
+        if not 1 <= limit <= MAX_LIBRARY_ITEMS or not 0 <= offset <= MAX_LIBRARY_ITEMS:
+            self._send_json(400, {
+                "error": f"limit must be 1-{MAX_LIBRARY_ITEMS} and offset must be 0-{MAX_LIBRARY_ITEMS}"
+            })
+            return
         root: Path = self.server.config["media_root"]
         items = []
         for directory, subdirs, filenames in os.walk(root, followlinks=False):
@@ -638,7 +649,15 @@ class MediaHubHandler(BaseHTTPRequestHandler):
                     continue
             if len(items) >= MAX_LIBRARY_ITEMS:
                 break
-        self._send_json(200, {"items": items, "truncated": len(items) >= MAX_LIBRARY_ITEMS})
+        items.sort(key=lambda item: item["path"].casefold())
+        page = items[offset:offset + limit]
+        self._send_json(200, {
+            "items": page,
+            "total": len(items),
+            "offset": offset,
+            "limit": limit,
+            "truncated": len(items) >= MAX_LIBRARY_ITEMS,
+        })
 
     def _stream_media(self) -> None:
         relative = self._query().get("path", [""])[0]

@@ -1,0 +1,24 @@
+"""Board/vendor-specific OTA writer interface (not a generic flash writer).
+
+Only implement with the ESP32's documented dual-slot/rollback layout.
+The inactive slot must be selected before writing; never overwrite the running
+partition. finish() must validate/activate the candidate safely and retain a
+rollback path. Leave OTA_ENABLED=False until reviewed on the exact board.
+"""
+
+
+def begin(board_id, version, size, sha256_hex):
+    raise NotImplementedError("Provide a verified inactive-slot OTA backend")
+
+
+def write(chunk):
+    raise NotImplementedError("Provide a verified inactive-slot OTA backend")
+
+
+def finish():
+    raise NotImplementedError("Provide a verified inactive-slot OTA backend")
+
+
+def abort():
+    # Discard the incomplete inactive-slot image, preserving the active image.
+    raise NotImplementedError("Provide a verified inactive-slot OTA backend")

@@ -58,26 +58,26 @@ In Assistant, set an already-running backend URL and model. Supported request sh
 
 The desktop AppImage supplies Music, Videos, Recorder, Browser, Notebook, Assistant, Robot, and T-HMI tools. Use App Shelf for user-added Pi shortcuts and static web apps: ZIP upload and GitHub import require `pi-media-hub-app.json` and `index.html`. Imported app files are validated static assets; Pi does not execute app source or install operating-system packages. The Setup page opens the official Raspberry Pi Imager download page and gives the service-install steps. OS imaging is destructive and must be performed explicitly in Raspberry Pi Imager; remote imaging/install via this controller is not supported.
 
-## Freenove robot (adapter preview; not a stock-kit driver)
+## Freenove robot (adapter source; not a stock-kit driver)
 
-Robot supports manual finite pulses, a small allowlisted JSON motion program, and an explicit-confirmation OTA upload **only** for ESP32 firmware implementing the fixed [robot adapter contract](docs/robot-adapter.md). Movement controls require a private-network address, bearer token, exact board profile, advertised stop capability, and a 100–600 ms on-device watchdog. Every motion pulse is capped at 400 ms; STOP is sent on release/program completion and on controller exit where possible. Robot updates verify a user-supplied ZIP's board ID and SHA-256, but SHA-256 is not a signature. The adapter must stop motors independently on timeout, reset, Wi-Fi loss, and OTA.
+`device/robot_adapter/` now contains uploadable MicroPython adapter **source** with authenticated status/control/STOP routes, allowlisted finite movement pulses, watchdog servicing, and a fixed OTA receiver contract. Motor outputs and OTA both default disabled; `motor_driver.py.example` and `ota_writer.py.example` are intentionally nonfunctional interfaces. The controller supports manual finite pulses, a small allowlisted JSON program, and explicit-confirmation OTA upload only after an adapter advertises the contract in [docs/robot-adapter.md](docs/robot-adapter.md). Robot updates verify a user-supplied ZIP's board ID and SHA-256, but SHA-256 is not a signature.
 
-No Freenove stock protocol or motor pins are guessed. No physical car can be driven until the exact kit revision/ESP32/motor-driver profile has matching adapter firmware and bench testing. Face tracking, camera support, board-specific custom firmware builds, Wi-Fi provisioning, and hardware validation are **not implemented**. The camera model/location and exact kit product details are required before those can be safely supported. Do not connect or flash a robot using an unrelated T-HMI `.bin`.
+No Freenove stock protocol or motor pins are guessed. The default robot source refuses movement and OTA, and is not a compiled binary. No physical car can be driven until the exact kit revision/ESP32/motor-driver profile has matching adapter firmware and bench testing. Face tracking, camera support, board-specific firmware builds/OTA writer, Wi-Fi provisioning, and hardware validation are **not implemented**. The camera model/location and exact kit product details are required before those can be safely supported. Do not connect or flash a robot using an unrelated T-HMI `.bin`.
 
 ## T-HMI firmware and serial testing
 
 Connect the board's USB cable to the Arch laptop, not to a headless Pi. In the controller's T-HMI page, detect the board's serial port, select a prebuilt `.bin`, set the offset prescribed by that firmware, and explicitly confirm Flash. `0x0` is only appropriate for a merged image. The bundled esptool invocation is fixed to the ESP32-S3 chip and selected serial port; the app does not accept shell commands or silently flash. The serial console can inspect boot output and send user-entered MicroPython REPL lines.
 
-This MVP flashes a firmware image supplied by you; it does **not** compile MicroPython firmware, identify every T-HMI revision automatically, or claim hardware testing. Use firmware and flash instructions matching the exact board revision, close other serial monitors, and expect flashing to erase existing contents. ESP32-S3 auto-download may need the board BOOT/RESET procedure. On Arch, add your user to the system's serial-device access group (commonly `uucp`) and log out/in again if the port is permission denied. No firmware is flashed until you choose an image, port, and confirm.
+This MVP flashes a firmware image supplied by you; it does **not** compile MicroPython firmware, identify every T-HMI revision automatically, or claim hardware testing. The upstream ESP32-S3 image source and device source installation steps are in [docs/device-firmware.md](docs/device-firmware.md). Use firmware matching the module's flash/PSRAM layout, close other serial monitors, and expect flashing to overwrite contents at the selected offsets. ESP32-S3 auto-download may need the board BOOT/RESET procedure. On Arch, add your user to the system's serial-device access group (commonly `uucp`) and log out/in again if the port is permission denied. No firmware is flashed until you choose an image, port, and confirm.
 
-The separate T-HMI `device/main.py` remains a MicroPython Wi-Fi status/library menu client. It needs MicroPython's `urequests` and a revision-specific display/touch adapter; the supplied adapter example is a contract/template, not a board driver.
+`device/main.py` is a MicroPython Wi-Fi menu client for Pi status, paginated library listings, and optional Assistant requests. `device/t_hmi_adapter.py.example` must be connected to the exact revision's display/touch driver for screen interaction; it is a stub, not a board driver.
 
 ## Service API and configuration
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health`, `GET /api/status` | Host health and basic counts |
-| `GET /api/library?kind=all\|audio\|video\|podcast&q=...` | Filtered media metadata |
+| `GET /api/library?kind=all\|audio\|video\|podcast&q=...&limit=...&offset=...` | Filtered/paginated media metadata |
 | `GET /media?path=relative/file.mp3` | Stream media with single byte ranges |
 | `GET /api/apps` | Read app shelf |
 | `POST /api/apps`, `POST /api/apps/upload`, `POST /api/apps/import/github`, `DELETE /api/apps/{id}` | Token-protected app shelf management |

@@ -6,7 +6,7 @@ The Robot page does **not** speak the Freenove stock protocol. No kit revision, 
 
 - Bind the adapter only to the robot's trusted private Wi-Fi network.
 - Authenticate every route using `Authorization: Bearer <token>`. Configure a unique token in the controller. HTTP does not encrypt this token; use only a trusted isolated LAN.
-- Status must truthfully report `profile: "pi-media-hub-robot-v1"`, `motor_stop: true`, the exact `board` profile, and a `motor_watchdog_ms` value from 100 through 600.
+- Status must truthfully report `profile: "pi-media-hub-robot-v1"`, `motor_stop: true`, the exact `board` profile, and a `motor_watchdog_ms` value from 100 through 600. The provided scaffold also reports `motor_enabled` and `ota_enabled`; both are false by default, and status alone does not certify physical hardware safety.
 - Each movement request is a finite pulse of at most 400 ms. The firmware must stop motors itself on that deadline, connection loss, reset, and watchdog expiry; controller release/STOP is an additional request, not a replacement for the on-device watchdog.
 - The `/api/stop` handler must immediately de-energize every motor and acknowledge only after applying stop. OTA must reject the wrong board/image and leave motors stopped before, during, and after update.
 - Never implement generic command execution, shell, or arbitrary pin-setting endpoints.
@@ -22,7 +22,7 @@ All endpoints are on the configured private HTTP(S) origin; the controller does 
 | `POST /api/stop` | Bearer-authenticated `{"command":"stop","duration_ms":0}`; stop immediately and return `{"accepted":true}` |
 | `PUT /api/firmware/update` | Bearer-authenticated binary image with `X-Firmware-Board`, `X-Firmware-Version`, and `X-Firmware-SHA256`; verify board, size, and digest, keep motors stopped, and respond `{"status":"accepted"}` or `{"status":"updated"}` |
 
-The controller provides bounded JSON programs with a 5-second total motion budget, sends a stop after execution, and supports explicit Wi-Fi update confirmation. Firmware ZIPs contain exactly `pi-media-hub-robot.json` and one `.bin` image. The manifest is:
+The controller provides bounded JSON programs with a 5-second total motion budget, sends a stop after execution, and supports explicit Wi-Fi update confirmation. The scaffold services a software stop deadline in its main loop and limits accepted client stalls, but that is not an independent hardware watchdog: a stuck interpreter/driver needs a hardware cutoff. Firmware ZIPs contain exactly `pi-media-hub-robot.json` and one `.bin` image. The manifest is:
 
 ```json
 {

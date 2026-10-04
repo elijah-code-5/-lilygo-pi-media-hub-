@@ -1,6 +1,7 @@
 import json
 import getpass
 import io
+import importlib.util
 import os
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from pi_media_hub.robot import (
     upload_firmware,
     validate_program,
 )
+from device.robot_adapter import protocol as robot_protocol
 
 
 class GuiTests(unittest.TestCase):
@@ -202,6 +204,103 @@ class GuiTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checksum"):
                 load_firmware_package(path, "freenove-custom-v1")
 
+    def test_robot_firmware_protocol_defaults_fail_safe(self):
+        self.assertFalse(robot_protocol.valid_token("wrong", "a" * 24))
+        self.assertTrue(robot_protocol.valid_token("a" * 24, "a" * 24))
+        self.assertEqual(
+            robot_protocol.validate_motion({"command": "stop", "duration_ms": 0}, False),
+            ("stop", 0),
+        )
+        for payload in (
+            {"command": "forward", "duration_ms": 100},
+            {"command": "gpio", "duration_ms": 1},
+            {"command": "stop", "duration_ms": 5},
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises((ValueError, RuntimeError)):
+                    robot_protocol.validate_motion(payload, False)
+        with self.assertRaisesRegex(RuntimeError, "OTA is disabled"):
+            robot_protocol.validate_ota_headers("board", "1.0", "a" * 64, 10, "board", False)
+        self.assertTrue(
+            robot_protocol.validate_ota_headers("board", "1.0", "a" * 64, 10, "board", True)
+        )
+        with self.assertRaisesRegex(ValueError, "mismatch"):
+            robot_protocol.validate_ota_headers("wrong", "1.0", "a" * 64, 10, "board", True)
+        with self.assertRaisesRegex(ValueError, "size"):
+            robot_protocol.validate_ota_headers(
+                "board", "1.0", "a" * 64, robot_protocol.MAX_FIRMWARE_BYTES + 1, "board", True
+            )
+
+    def test_robot_firmware_http_api_auth_and_motor_gate(self):
+        config = type("Config", (), {
+            "ADMIN_TOKEN": "a" * 24,
+            "ALLOWED_CLIENT_PREFIXES": ("192.168.1.",),
+            "MOTOR_ENABLED": False,
+            "OTA_ENABLED": False,
+            "BOARD_ID": "profile-not-configured",
+            "FIRMWARE_VERSION": "0.1.0-template",
+            "WIFI_SSID": "test",
+            "WIFI_PASSWORD": "test",
+        })
+        network = type("Network", (), {"STA_IF": 0, "WLAN": lambda _interface: None})
+        module_path = Path(__file__).parents[1] / "device/robot_adapter/main.py"
+        robot_dir = str(module_path.parent)
+        sys.path.insert(0, robot_dir)
+        try:
+            with patch.dict(sys.modules, {"config": config, "network": network}):
+                spec = importlib.util.spec_from_file_location("robot_firmware_test", module_path)
+                firmware = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(firmware)
+        finally:
+            sys.path.remove(robot_dir)
+
+        class FakeSocket:
+            def __init__(self, request):
+                self.request = request
+                self.response = bytearray()
+
+            def recv(self, size):
+                chunk, self.request = self.request[:size], self.request[size:]
+                return chunk
+
+            def send(self, data):
+                self.response.extend(data)
+                return len(data)
+
+        def call(method, path, payload, *, authenticated=True, address=("192.168.1.5", 5000)):
+            body = json.dumps(payload).encode()
+            auth = "Authorization: Bearer {}\r\n".format("a" * 24 if authenticated else "wrong")
+            request = (
+                "{} {} HTTP/1.1\r\nHost: robot\r\n{}Content-Type: application/json\r\n"
+                "Content-Length: {}\r\n\r\n".format(method, path, auth, len(body)).encode() + body
+            )
+            client = FakeSocket(request)
+            firmware._handle_client(client, address)
+            head, response_body = bytes(client.response).split(b"\r\n\r\n", 1)
+            return int(head.split(b" ")[1]), json.loads(response_body)
+
+        self.assertEqual(call("GET", "/api/status", {})[0], 200)
+        self.assertEqual(
+            call("POST", "/api/control", {"command": "forward", "duration_ms": 100}, authenticated=False)[0],
+            401,
+        )
+        status, response = call("POST", "/api/control", {"command": "forward", "duration_ms": 100})
+        self.assertEqual(status, 503)
+        self.assertIn("disabled", response["error"])
+        status, response = call("POST", "/api/stop", {})
+        self.assertEqual(status, 200)
+        self.assertTrue(response["accepted"])
+        status, response = call(
+            "PUT",
+            "/api/firmware/update",
+            {},
+        )
+        self.assertEqual(status, 501)
+        self.assertEqual(
+            call("GET", "/api/status", {}, address=("10.0.0.5", 5000))[0],
+            403,
+        )
+
 
 class ServerTests(unittest.TestCase):
     def setUp(self):
@@ -254,6 +353,19 @@ class ServerTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in json.loads(body)["items"]], ["episode.ogg"])
         _, _, body = self.request("/api/library?kind=video")
         self.assertEqual([item["name"] for item in json.loads(body)["items"]], ["movie.mp4"])
+
+    def test_library_pagination_preserves_total_and_rejects_bad_ranges(self):
+        for index in range(5):
+            (self.root / "track-{}.mp3".format(index)).write_bytes(b"track")
+        status, _, body = self.request("/api/library?kind=audio&limit=2&offset=1")
+        self.assertEqual(status, 200)
+        result = json.loads(body)
+        self.assertEqual(result["total"], 6)
+        self.assertEqual(result["offset"], 1)
+        self.assertEqual(len(result["items"]), 2)
+        self.assertEqual(result["items"][0]["path"], "track-0.mp3")
+        self.assertEqual(self.request("/api/library?limit=0")[0], 400)
+        self.assertEqual(self.request("/api/library?offset=invalid")[0], 400)
 
     def test_media_stream_and_byte_range(self):
         status, headers, body = self.request("/media?path=song.mp3", headers={"Range": "bytes=2-5"})

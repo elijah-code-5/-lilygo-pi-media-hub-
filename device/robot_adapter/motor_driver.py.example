@@ -1,0 +1,21 @@
+"""Board-specific motor driver contract; deliberately nonfunctional template.
+
+Copy to motor_driver.py only after identifying the exact controller/driver.
+Implement only stop() and move(allowed_command). Never expose pin numbers or
+arbitrary GPIO writes over the network.
+"""
+
+BOARD_ID = ""
+
+
+def stop():
+    # TODO: de-energize every motor output immediately and safely.
+    raise NotImplementedError("Configure the verified motor-driver board first")
+
+
+def move(command):
+    if command not in ("forward", "backward", "left", "right"):
+        raise ValueError("Unsupported movement")
+    # TODO: implement fixed-direction mappings for this exact motor driver.
+    # No web-supplied pin numbers, duty cycles, or Python code.
+    raise NotImplementedError("Configure the verified motor-driver board first")

@@ -907,9 +907,11 @@ class MediaHubApp:
 
         def verified(result):
             self.robot_adapter_verified = True
+            motors = "ENABLED" if result.get("motor_enabled") else "DISABLED (safe default)"
+            ota = "enabled" if result.get("ota_enabled") else "disabled"
             self.robot_status.set(
                 f"Verified {result.get('board', 'robot')} • firmware {result.get('version', 'unknown')} • "
-                f"stop watchdog {result['motor_watchdog_ms']} ms."
+                f"software stop bound {result['motor_watchdog_ms']} ms • motors {motors} • OTA {ota}."
             )
             self.settings.update({
                 "robot_url": address,
