@@ -12,6 +12,12 @@ def main():
     if sys.argv[1:2] == ["--gui-smoke-test"]:
         import tkinter as tk
         from pi_media_hub.gui import MediaHubApp
+        import esptool
+        from serial.tools import list_ports
+
+        if not callable(esptool.main):
+            raise RuntimeError("Bundled esptool API is unavailable")
+        list_ports.comports()
         root = tk.Tk()
         root.withdraw()
         MediaHubApp(root)
