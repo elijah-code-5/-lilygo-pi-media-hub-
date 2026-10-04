@@ -1,0 +1,5 @@
+{
+  "id": "hello-web",
+  "name": "Hello Web",
+  "description": "Example packaged static web app for the Pi Media Hub shelf."
+}

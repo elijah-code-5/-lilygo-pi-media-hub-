@@ -32,14 +32,17 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 appdir="$work/PiMediaHub.AppDir"
-mkdir -p "$appdir/usr/bin" "$appdir/usr/share/pi-media-hub"
+mkdir -p "$appdir/usr/bin" "$appdir/usr/share/pi-media-hub" "$work/bundle/pi_media_hub"
+cp "$root"/src/pi_media_hub/*.py "$work/bundle/pi_media_hub/"
 
 (
   cd "$root"
   python3 -m PyInstaller --noconfirm --clean --onefile \
     --name pi-media-hub \
-    --add-data "$root/src/pi_media_hub:pi_media_hub" \
+    --add-data "$work/bundle/pi_media_hub:pi_media_hub" \
     --add-data "$root/config.example.json:share/pi-media-hub" \
+    --collect-all esptool \
+    --collect-all serial \
     --paths "$root/src" \
     --specpath "$work" \
     --distpath "$work/dist" \
@@ -63,7 +66,42 @@ Icon=pi-media-hub
 Categories=Utility;
 Terminal=false
 EOF
-printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8ioAAAAASUVORK5CYII=' | base64 -d > "$appdir/pi-media-hub.png"
+python3 - "$appdir/pi-media-hub.png" <<'PY'
+import math
+import struct
+import sys
+import zlib
+
+size = 128
+rows = []
+for y in range(size):
+    row = bytearray([0])
+    for x in range(size):
+        distance = math.hypot(x - 64, y - 64)
+        color = (16, 21, 29, 255)
+        if distance < 48:
+            color = (80, 216, 187, 255)
+        if 15 < distance < 18:
+            color = (237, 243, 251, 255)
+        if distance < 10:
+            color = (27, 38, 52, 255)
+        if 79 < x < 88 and 33 < y < 73:
+            color = (237, 243, 251, 255)
+        if 70 < x < 88 and 67 < y < 73:
+            color = (237, 243, 251, 255)
+        row.extend(color)
+    rows.append(bytes(row))
+
+def chunk(kind, data):
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+png = b"\x89PNG\r\n\x1a\n"
+png += chunk(b"IHDR", struct.pack(">2I5B", size, size, 8, 6, 0, 0, 0))
+png += chunk(b"IDAT", zlib.compress(b"".join(rows), 9))
+png += chunk(b"IEND", b"")
+with open(sys.argv[1], "wb") as icon:
+    icon.write(png)
+PY
 chmod +x "$appdir/AppRun" "$appdir/usr/bin/pi-media-hub"
 output="$root/dist/pi-media-hub-${target}.AppImage"
 mkdir -p "$root/dist"

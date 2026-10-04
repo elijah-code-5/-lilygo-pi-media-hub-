@@ -1,18 +1,26 @@
 import json
 import getpass
+import io
 import os
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
+import zipfile
+from unittest.mock import patch
 from http.client import HTTPConnection
 from pathlib import Path
 from urllib.parse import quote
 
 from pi_media_hub.server import MediaHubServer, load_config
 from pi_media_hub.setup import main as setup_main
-from pi_media_hub.gui import normalize_server_url
+from pi_media_hub.gui import (
+    build_flash_args,
+    normalize_ai_endpoint,
+    normalize_server_url,
+    save_controller_settings,
+)
 
 
 class GuiTests(unittest.TestCase):
@@ -22,6 +30,31 @@ class GuiTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(ValueError):
                     normalize_server_url(invalid)
+
+    def test_openai_endpoint_normalization(self):
+        self.assertEqual(normalize_ai_endpoint("OpenAI compatible", "http://pi:8000"), "http://pi:8000/v1/chat/completions")
+        self.assertEqual(normalize_ai_endpoint("OpenAI compatible", "http://pi:8000/v1/"), "http://pi:8000/v1/chat/completions")
+        self.assertEqual(normalize_ai_endpoint("Ollama", "http://pi:11434/api/chat"), "http://pi:11434/api/chat")
+
+    def test_firmware_flash_arguments_are_fixed_and_validated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "firmware.bin"
+            image.write_bytes(b"firmware")
+            args = build_flash_args("/dev/ttyACM0", str(image), "0x0", "460800")
+            self.assertEqual(args[:7], ["--chip", "esp32s3", "--port", "/dev/ttyACM0", "--baud", "460800", "write-flash"])
+            for port in ("/dev/sda", "/tmp/serial", "--erase-all"):
+                with self.subTest(port=port), self.assertRaises(ValueError):
+                    build_flash_args(port, str(image), "0x0", "460800")
+            with self.assertRaises(ValueError):
+                build_flash_args("/dev/ttyACM0", str(image), "not-hex", "460800")
+
+    def test_controller_settings_are_private_and_persistent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"XDG_CONFIG_HOME": directory}):
+                save_controller_settings({"server_url": "http://pi.local:8765", "admin_token": "secret"})
+            settings_path = Path(directory) / "pi-media-hub/controller.json"
+            self.assertEqual(json.loads(settings_path.read_text())["server_url"], "http://pi.local:8765")
+            self.assertEqual(settings_path.stat().st_mode & 0o777, 0o600)
 
 
 class ServerTests(unittest.TestCase):
@@ -39,6 +72,8 @@ class ServerTests(unittest.TestCase):
             "host": "127.0.0.1",
             "port": 8765,
             "media_root": str(self.root),
+            "apps_dir": str(Path(self.temp.name) / "apps"),
+            "admin_token": "test-admin-token",
             "catalog": [{"id": "library", "name": "Library"}],
             "ai": {"enabled": False},
         }))
@@ -89,6 +124,124 @@ class ServerTests(unittest.TestCase):
     def test_invalid_library_filter(self):
         self.assertEqual(self.request("/api/library?kind=unknown")[0], 400)
 
+    def test_app_management_requires_token_and_persists_manifest(self):
+        manifest = {
+            "id": "weather",
+            "name": "Weather",
+            "description": "Forecast",
+            "url": "https://example.org/weather",
+        }
+        body = json.dumps(manifest)
+        self.assertEqual(self.request("/api/apps", "POST", body=body)[0], 401)
+        status, _, _ = self.request(
+            "/api/apps",
+            "POST",
+            headers={"Authorization": "Bearer test-admin-token", "Content-Type": "application/json"},
+            body=body,
+        )
+        self.assertEqual(status, 201)
+        self.assertIn(manifest, json.loads(self.config_path.read_text())["catalog"])
+        self.assertEqual(self.request("/api/apps/weather")[0], 200)
+        status, _, _ = self.request(
+            "/api/apps/weather",
+            "DELETE",
+            headers={"Authorization": "Bearer test-admin-token"},
+        )
+        self.assertEqual(status, 200)
+
+    def test_ai_settings_are_protected_and_saved(self):
+        payload = json.dumps({
+            "enabled": True,
+            "endpoint": "http://127.0.0.1:11434/api/chat",
+            "model": "small-model",
+            "backend": "Ollama",
+        })
+        self.assertEqual(self.request("/api/config/ai", "POST", body=payload)[0], 401)
+        headers = {"Authorization": "Bearer test-admin-token", "Content-Type": "application/json"}
+        self.assertEqual(self.request("/api/config/ai", "POST", headers=headers, body=payload)[0], 200)
+        self.assertEqual(json.loads(self.config_path.read_text())["ai"]["model"], "small-model")
+        self.assertEqual(self.request("/api/config/ai", headers={"Authorization": "Bearer test-admin-token"})[0], 200)
+        self.assertEqual(self.request("/api/chat", "POST", body='{"message":"hello"}')[0], 401)
+
+    def test_static_web_app_zip_upload_is_sandboxed_and_removable(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("demo-repo/pi-media-hub-app.json", json.dumps({
+                "id": "demo",
+                "name": "Demo app",
+                "description": "A static demo",
+            }))
+            bundle.writestr("demo-repo/index.html", "<h1>Hello</h1>")
+            bundle.writestr("demo-repo/app.js", "alert('sandboxed')")
+            bundle.writestr("demo-repo/run.py", "must not be installed")
+        headers = {
+            "Authorization": "Bearer test-admin-token",
+            "Content-Type": "application/zip",
+        }
+        status, _, response = self.request("/api/apps/upload", "POST", headers=headers, body=archive.getvalue())
+        self.assertEqual(status, 201, response)
+        installed = json.loads(response)["app"]
+        self.assertEqual(installed["url"], "/apps/demo/index.html")
+        self.assertTrue((Path(self.temp.name) / "apps/demo/index.html").is_file())
+        self.assertFalse((Path(self.temp.name) / "apps/demo/run.py").exists())
+        status, headers, body = self.request(installed["url"])
+        self.assertEqual(status, 200)
+        self.assertIn(("Content-Security-Policy", "sandbox allow-scripts; default-src 'self' data:; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'"), headers)
+        self.assertEqual(body, b"<h1>Hello</h1>")
+        self.assertEqual(self.request("/apps/demo/../config.json")[0], 404)
+
+    def test_app_archive_rejects_path_traversal(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("demo/pi-media-hub-app.json", json.dumps({"id": "demo", "name": "Demo"}))
+            bundle.writestr("demo/index.html", "safe")
+            bundle.writestr("demo/../../escape.txt", "unsafe")
+        self.assertEqual(
+            self.request(
+                "/api/apps/upload",
+                "POST",
+                headers={"Authorization": "Bearer test-admin-token", "Content-Type": "application/zip"},
+                body=archive.getvalue(),
+            )[0],
+            400,
+        )
+
+    def test_github_import_fetches_fixed_host_archive(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("repo-main/pi-media-hub-app.json", json.dumps({
+                "id": "remote-app",
+                "name": "Remote App",
+                "description": "Static Github import",
+            }))
+            bundle.writestr("repo-main/index.html", "remote")
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def geturl(self):
+                return "https://codeload.github.com/owner/repo/zip/refs/heads/main"
+
+            def read(self, _limit):
+                return archive.getvalue()
+
+        with patch("pi_media_hub.server.urlopen", return_value=Response()) as fetch:
+            status, _, body = self.request(
+                "/api/apps/import/github",
+                "POST",
+                headers={"Authorization": "Bearer test-admin-token", "Content-Type": "application/json"},
+                body=json.dumps({"owner": "owner", "repo": "repo"}),
+            )
+        self.assertEqual(status, 201, body)
+        self.assertIn("codeload.github.com", fetch.call_args.args[0].full_url)
+        app = json.loads(body)["app"]
+        self.assertEqual(app["source"], "owner/repo")
+        self.assertEqual(self.request(app["url"])[2], b"remote")
+
 
 class SetupTests(unittest.TestCase):
     def test_install_copies_server_and_preserves_existing_config(self):
@@ -104,6 +257,7 @@ class SetupTests(unittest.TestCase):
                 "--config-dir", str(config_dir),
                 "--unit-dir", str(root / "systemd"),
                 "--media-root", str(root / "media"),
+                "--apps-dir", str(root / "var/apps"),
                 "--service-user", getpass.getuser(),
             ])
             self.assertEqual(result, 0)
@@ -139,10 +293,13 @@ class SetupTests(unittest.TestCase):
                 "--config-dir", str(new_config_dir),
                 "--unit-dir", str(root / "new-systemd"),
                 "--media-root", str(root / "new-media"),
+                "--apps-dir", str(root / "new-var/apps"),
                 "--service-user", getpass.getuser(),
             ])
             created = json.loads((new_config_dir / "config.json").read_text())
             self.assertEqual(created["media_root"], str(root / "new-media"))
+            self.assertEqual(created["apps_dir"], str(root / "new-var/apps"))
+            self.assertGreaterEqual(len(created["admin_token"]), 32)
 
 
 if __name__ == "__main__":

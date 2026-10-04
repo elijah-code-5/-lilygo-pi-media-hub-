@@ -5,6 +5,7 @@ import getpass
 import json
 import os
 import pwd
+import secrets
 import shutil
 import sys
 from pathlib import Path
@@ -29,6 +30,7 @@ def _install(args: argparse.Namespace) -> int:
     config_dir = Path(args.config_dir).expanduser().resolve()
     unit_dir = Path(args.unit_dir).expanduser().resolve()
     package_dir = prefix / "lib" / "pi_media_hub"
+    apps_dir = Path(args.apps_dir).expanduser().resolve()
     config_path = config_dir / "config.json"
     unit_path = unit_dir / "pi-media-hub.service"
     resource_root = _resource_root()
@@ -50,13 +52,25 @@ def _install(args: argparse.Namespace) -> int:
     package_dir.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source_package, package_dir, dirs_exist_ok=True)
     config_dir.mkdir(parents=True, exist_ok=True)
-    if not config_path.exists():
+    is_new_config = not config_path.exists()
+    if is_new_config:
         config = json.loads(sample_config.read_text(encoding="utf-8"))
         config["media_root"] = str(Path(args.media_root).expanduser().resolve())
-        config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        config["apps_dir"] = str(apps_dir)
+    else:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    config.setdefault("apps_dir", str(apps_dir))
+    apps_dir = Path(config["apps_dir"]).expanduser().resolve()
+    if not isinstance(config.get("admin_token"), str) or not config["admin_token"] or config["admin_token"].startswith("replace-"):
+        config["admin_token"] = secrets.token_urlsafe(32)
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     os.chmod(config_path, 0o640)
     if os.geteuid() == 0:
         os.chown(config_path, service_account.pw_uid, service_account.pw_gid)
+        os.chown(config_dir, service_account.pw_uid, service_account.pw_gid)
+    apps_dir.mkdir(parents=True, exist_ok=True)
+    if os.geteuid() == 0:
+        os.chown(apps_dir, service_account.pw_uid, service_account.pw_gid)
     unit_dir.mkdir(parents=True, exist_ok=True)
     unit = f"""[Unit]
 Description=Pi Media Hub
@@ -71,9 +85,11 @@ ExecStart=/usr/bin/python3 -m pi_media_hub.server --config {config_path}
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
-ProtectSystem=full
+PrivateTmp=true
+ProtectSystem=strict
 ProtectHome=read-only
 ReadOnlyPaths={Path(args.media_root).expanduser().resolve()}
+ReadWritePaths={apps_dir} {config_path}
 
 [Install]
 WantedBy=multi-user.target
@@ -96,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     install.add_argument("--config-dir", default="/etc/pi-media-hub")
     install.add_argument("--unit-dir", default="/etc/systemd/system")
     install.add_argument("--media-root", default="/srv/media")
+    install.add_argument("--apps-dir", default="/var/lib/pi-media-hub/apps")
     install.add_argument("--service-user", default=os.environ.get("SUDO_USER", getpass.getuser()))
     install.set_defaults(handler=_install)
     args = parser.parse_args(argv)

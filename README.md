@@ -1,94 +1,98 @@
 # Pi Media Hub
 
-A small media server for a Raspberry Pi 5 (4 GB), a desktop controller for Linux x86_64/ARM64, and a MicroPython Wi-Fi status/menu client for a LilyGO T-HMI ESP32-S3. This is an initial MVP, not a complete media center: playback happens in a browser or another client using the stream URL; the ESP32 lists library entries but does not decode media.
+Pi Media Hub pairs a Raspberry Pi 5 media/server host with a desktop controller for the laptop and a MicroPython status client for the LilyGO T-HMI ESP32-S3. The controller is a GUI AppImage; it does not need a terminal for everyday browsing and control. The server is installed on the Pi, not the Arch laptop.
 
-## Desktop AppImage (Arch laptop controller)
+## Download and launch the desktop controller
 
-Download `pi-media-hub-x86_64.AppImage` from the x86_64 artifact of the latest successful [CI run](https://github.com/elijah-code-5/-lilygo-pi-media-hub-/actions). In Arch's file manager, mark it executable in Properties and open it; or launch from a terminal with:
+Use the latest successful [CI run](https://github.com/elijah-code-5/-lilygo-pi-media-hub-/actions) and download `pi-media-hub-x86_64` for an Arch x86_64 laptop, or `pi-media-hub-aarch64` for 64-bit ARM Linux. These are Linux desktop controllers, not firmware.
+
+On Arch, make the downloaded AppImage executable (file-manager Properties → Permissions → Allow executing, or once in a terminal):
 
 ```sh
 chmod +x ~/Downloads/pi-media-hub-x86_64.AppImage
-APPIMAGE_EXTRACT_AND_RUN=1 ~/Downloads/pi-media-hub-x86_64.AppImage
 ```
 
-This opens a GUI controller. Enter the Pi server URL (for example `http://raspberrypi.local:8765` or `http://<pi-lan-ip>:8765`) and choose **Connect**. The Library tab lists media, App catalog shows configured entries, and Local AI accepts a JSON request in the backend's expected format. The Pi server must already be running and reachable; this controller does not silently install a server over SSH. If the AppImage reports a FUSE error, `APPIMAGE_EXTRACT_AND_RUN=1` is the documented fallback. The GUI requires a graphical desktop session.
+Then double-click it. If AppImage reports missing FUSE, launch from a terminal once with `APPIMAGE_EXTRACT_AND_RUN=1 ~/Downloads/pi-media-hub-x86_64.AppImage`; the AppImage still starts the GUI. The desktop session needs Tk support (included in the image) and a graphical display. The controller remembers the Pi address and admin token in `~/.config/pi-media-hub/controller.json` with owner-only file permissions.
 
-On ARM64 Linux, `pi-media-hub-aarch64.AppImage` opens the same controller plus a **Start local server** panel. This runs the server from the selected directory while the GUI remains open; closing the window stops that in-app server. For a persistent boot service, use the Pi systemd setup below. Server access stays LAN-only/private-network-filtered by default.
+In the window, enter the Pi's LAN URL (for example `http://192.168.1.42:8765` or `http://raspberrypi.local:8765`) and connect. The Overview reports host/library/catalog status. Media Library supports audio/video/podcast filtering and search; double-click a row or choose Play/Open to stream it in your browser. App Shelf can create web shortcuts, upload a packaged app ZIP, import a compatible GitHub repository, launch, and remove entries. Local AI configures the model endpoint on the Pi and provides a basic chat panel. T-HMI detects USB serial ports, flashes a user-selected ESP32-S3 `.bin` using bundled esptool after an explicit confirmation, and provides a serial REPL console.
 
-## Run the server
+## Start the server on the Raspberry Pi
 
-Requires Python 3.10+ and no third-party runtime packages.
-
-```sh
-mkdir -p /srv/media
-cp config.example.json config.json
-# Edit config.json and set media_root to your media directory.
-PYTHONPATH=src python3 -m pi_media_hub --config config.json
-```
-
-Check `http://127.0.0.1:8765/health` on the host. Available endpoints:
-
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /health`, `GET /api/status` | Health and basic server status |
-| `GET /api/library?kind=all\|audio\|video\|podcast&q=...` | Media metadata and stream URLs |
-| `GET /media?path=relative/path.mp3` | Stream a file; supports one HTTP byte range |
-| `GET /api/apps` | Configured app catalog |
-| `POST /api/chat` | Optional pass-through to a configured HTTP AI backend |
-
-Podcast files are audio files under a directory named `Podcasts` (case-insensitive). Other common audio and video formats are listed. The library response is capped at 5,000 files.
-
-## Raspberry Pi installation
-
-On the Pi, install Python 3 and systemd, create a media directory, and run the setup CLI as an account allowed to write `/opt`, `/etc`, and the systemd unit directory. The AppImage itself launches the desktop controller by default; `install` is an explicit CLI maintenance command:
+The Pi hosts the media and should be on the same trusted LAN as the controller. Copy the ARM64 AppImage to the Pi. For a persistent server that starts at boot, install the service once (the desktop app itself is not an automatic service installer):
 
 ```sh
 sudo mkdir -p /srv/media
 sudo chown "$USER":"$USER" /srv/media
 sudo env APPIMAGE_EXTRACT_AND_RUN=1 ./pi-media-hub-aarch64.AppImage install --media-root /srv/media --service-user "$USER"
-sudoedit /etc/pi-media-hub/config.json
 sudo systemctl daemon-reload
 sudo systemctl enable --now pi-media-hub
-systemctl status pi-media-hub
-curl http://127.0.0.1:8765/health
 ```
 
-The setup utility copies the Python server to `/opt/pi-media-hub`, keeps an existing config rather than overwriting it, and writes a systemd service. It prints systemd commands but does not execute them. Review the generated unit and configuration before starting the service. The server runs as the selected unprivileged service user. If updating an earlier install, rerun the installer with the replacement AppImage; it refreshes the server package and unit while preserving your configuration.
+The setup command installs the Python server, creates a random Pi admin token, preserves an existing media configuration, and writes the corrected systemd entrypoint. On the Pi, copy the `admin_token` value from `/etc/pi-media-hub/config.json` into the controller's Pi admin token field. Treat this token as a password. On an ARM64 Pi with a desktop, the GUI also has a temporary local server control and folder picker; that server stops when the GUI closes. The systemd installation is preferred for normal Pi hosting.
 
-If an older install's journal says `No module named pi_media_hub.__main__`, update the installed package and service using the replacement AppImage. As a temporary service-only workaround, write a systemd drop-in that replaces `ExecStart` with `/usr/bin/python3 -m pi_media_hub.server --config /etc/pi-media-hub/config.json`, then run `sudo systemctl daemon-reload` and `sudo systemctl restart pi-media-hub`.
+To verify the service, open `http://127.0.0.1:8765/health` on the Pi or connect from the controller. If it fails, inspect `sudo journalctl -u pi-media-hub -b --no-pager -n 60`.
 
-## Building AppImages
+## App Shelf: shortcuts and packaged static apps
 
-AppImages are Linux host setup utilities, **not ESP32 firmware**. Build a separate native image for each target:
+Create Shortcut registers an ordinary HTTP(S) web link. **Launch opens it in the laptop's browser; it does not run arbitrary programs on the Pi.** Upload Web App ZIP installs a small static web app on the Pi; GitHub import downloads the selected repository's ZIP from GitHub. Both expect a root `pi-media-hub-app.json` manifest and `index.html`. For a GitHub repository the required manifest format is:
+
+```json
+{
+  "id": "my-app",
+  "name": "My App",
+  "description": "A static web app"
+}
+```
+
+For ZIP uploads, place the manifest and `index.html` inside one top-level folder and select the ZIP. `examples/hello-web-app/` is a tiny example. Imported package files are restricted to static web asset types and served with a browser sandbox policy; Python, shell scripts, and other executable server-side content are not run. The Pi limits ZIPs to 24 MiB compressed, 32 MiB unpacked, and 250 files. GitHub projects must include the manifest and a static app entry page; ordinary source repos are not automatically converted or built. App add/import/remove and AI configuration require the admin token.
+
+## Media library and playback
+
+The server indexes common audio (`mp3`, `m4a`, `flac`, `ogg`, `wav`, and others) and video (`mp4`, `mkv`, `webm`, and others) in `media_root`. Audio beneath a folder whose name starts with `podcast` is categorized as a podcast. The library returns metadata; selecting a file opens its byte-range-capable stream URL in the browser. Codec support and playback controls are provided by that browser, not by the Pi service or T-HMI.
+
+## Local AI
+
+In Local AI, set an already-running backend URL and model. Supported request shapes in the controller are Ollama `/api/chat`, OpenAI-compatible `/v1/chat/completions`, and a custom JSON endpoint. Enable and save the settings on the Pi, then chat. The Pi makes outbound requests to that configured URL and stores the setting in its protected config. No model is downloaded or built by this project. A Pi 5 with 4 GB has limited capacity; use a small quantized model, reduce context, or host inference elsewhere on your trusted LAN. Model installation, performance, and compatibility depend on the backend.
+
+## T-HMI firmware and serial testing
+
+Connect the board's USB cable to the Arch laptop, not to a headless Pi. In the controller's T-HMI page, detect the board's serial port, select a prebuilt `.bin`, set the offset prescribed by that firmware, and explicitly confirm Flash. `0x0` is only appropriate for a merged image. The bundled esptool invocation is fixed to the ESP32-S3 chip and selected serial port; the app does not accept shell commands or silently flash. The serial console can inspect boot output and send user-entered MicroPython REPL lines.
+
+This MVP flashes a firmware image supplied by you; it does **not** compile MicroPython firmware, identify every T-HMI revision automatically, or claim hardware testing. Use firmware and flash instructions matching the exact board revision, close other serial monitors, and expect flashing to erase existing contents. ESP32-S3 auto-download may need the board BOOT/RESET procedure. On Arch, add your user to the system's serial-device access group (commonly `uucp`) and log out/in again if the port is permission denied. No firmware is flashed until you choose an image, port, and confirm.
+
+The separate T-HMI `device/main.py` remains a MicroPython Wi-Fi status/library menu client. It needs MicroPython's `urequests` and a revision-specific display/touch adapter; the supplied adapter example is a contract/template, not a board driver.
+
+## Service API and configuration
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health`, `GET /api/status` | Host health and basic counts |
+| `GET /api/library?kind=all\|audio\|video\|podcast&q=...` | Filtered media metadata |
+| `GET /media?path=relative/file.mp3` | Stream media with single byte ranges |
+| `GET /api/apps` | Read app shelf |
+| `POST /api/apps`, `POST /api/apps/upload`, `POST /api/apps/import/github`, `DELETE /api/apps/{id}` | Token-protected app shelf management |
+| `GET/POST /api/config/ai` | Token-protected AI settings |
+| `POST /api/chat` | Token-protected pass-through request to configured model backend |
+
+Example server configuration is in `config.example.json`. The installer fills an empty admin token with a fresh random value; direct/manual server setups must set `admin_token` to a long random secret before enabling management operations. Podcast files are detected under a folder named `Podcasts` (case-insensitive). The library caps results at 5,000 files.
+
+## Network safety and limits
+
+The service listens on port 8765 and accepts only loopback/private-network client addresses. Keep it on a trusted LAN/VLAN, allow the port only on that LAN, and never forward it to the public internet. It has no TLS; use a trusted isolated LAN. Admin token protects write operations and AI requests. Media paths are constrained beneath the configured root, symlinked media directories are not traversed, and app ZIP extraction rejects traversal/symlinks and serves only allowlisted static asset types. The sandbox is defense-in-depth; install only apps you trust. The AI URL is an admin-controlled outbound destination.
+
+Limitations: no user accounts, multi-user permissions, browser-native codec guarantees, automatic USB flashing across all board revisions, firmware builds, remote SSH installation, or arbitrary native Pi app execution. Uploaded/GitHub apps are static browser apps, not OS packages.
+
+## Build and verify
+
+Build on the matching native Linux architecture; cross-architecture AppImage builds are intentionally rejected:
 
 ```sh
-python3 -m pip install PyInstaller
-# Install appimagetool for this host architecture and put it on PATH.
-scripts/build_appimage.sh x86_64   # on x86_64 Linux
-scripts/build_appimage.sh aarch64  # on ARM64 Linux (e.g. Raspberry Pi OS 64-bit)
+python3 -m pip install PyInstaller esptool pyserial
+scripts/build_appimage.sh x86_64    # x86_64 Linux
+scripts/build_appimage.sh aarch64   # ARM64 Linux
 ```
 
-The build intentionally refuses cross-architecture builds. Each AppImage bundles the desktop controller and setup CLI; the persistent systemd service uses the host's `/usr/bin/python3`. CI builds x86_64 and ARM64 images on native runners. AppImage execution can require FUSE; on systems without it, use the AppImage's supported extract-and-run mode. The GUI supports connection to an already-running server; it does not perform remote SSH installation or flash ESP32 firmware.
-
-## T-HMI MicroPython client
-
-1. Flash a MicroPython ESP32-S3 firmware image compatible with your exact T-HMI revision using the board vendor's supported flashing tool. This repository does not include a board firmware binary or flash hardware automatically.
-2. Install MicroPython's `urequests` module if it is not already present, copy `device/main.py` to the board, edit the Wi-Fi credentials and `SERVER_URL`, then run it from the MicroPython REPL.
-3. For an on-device display/touch menu, install the display/touch drivers for your exact T-HMI revision and provide `t_hmi_adapter.py` next to `main.py`. The adapter contract is exactly `show(lines: list[str])` and `read_key()`, returning `"up"`, `"down"`, `"select"`, `"back"`, or `None`. `device/t_hmi_adapter.py.example` is a placeholder template, not a hardware driver. Without an adapter, the client displays status in the REPL and accepts `up`, `down`, `select`, or `q` over the serial console.
-
-The T-HMI runs the status/menu client only. It does not play or decode audio/video. Board revisions and available MicroPython display/touch drivers differ; no display controller, touch IC, pin map, or tested hardware revision is assumed by this MVP.
-
-## Optional local AI
-
-AI is off by default. To connect an already-running local HTTP model service, set `ai.enabled` to `true` and `ai.endpoint` to its chat-compatible JSON endpoint in `config.json`. The hub forwards the supplied JSON body and returns the backend response; it downloads no model and makes no claim that inference runs well on 4 GB RAM. Configure only a backend you trust. Requests are size-limited and have a configurable timeout.
-
-## Network and safety
-
-The default listener is port 8765 on all interfaces so Wi-Fi clients can reach it, but the server accepts only loopback and private-network client IPs. Keep it on a trusted LAN/VLAN, restrict the port in the host firewall, and do not forward it from the internet. There is no user authentication or TLS in this MVP. Configure `host` to a specific LAN address if preferred. Media paths are resolved and constrained beneath `media_root`; symlinked directories are not traversed. The server exposes only supported audio/video files, and supports single-range streaming.
-
-The AI endpoint is a trusted administrator setting; the hub makes outbound requests to that URL when AI is enabled. Do not point it at an untrusted endpoint.
-
-## Development and tests
+Run server tests with:
 
 ```sh
 PYTHONPATH=src python3 -m unittest discover -s tests -v

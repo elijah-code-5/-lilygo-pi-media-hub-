@@ -2,6 +2,8 @@
   "host": "0.0.0.0",
   "port": 8765,
   "media_root": "/srv/media",
+  "apps_dir": "/var/lib/pi-media-hub/apps",
+  "admin_token": "",
   "catalog": [
     {
       "id": "library",

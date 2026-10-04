@@ -13,5 +13,8 @@ license = { text = "MIT" }
 pi-media-hub = "pi_media_hub.server:main"
 pi-media-hub-setup = "pi_media_hub.setup:main"
 
+[project.optional-dependencies]
+firmware = ["esptool>=5,<6", "pyserial>=3.5"]
+
 [tool.setuptools.packages.find]
 where = ["src"]

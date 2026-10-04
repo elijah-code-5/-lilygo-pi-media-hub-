@@ -9,6 +9,15 @@ def main():
         raise SystemExit(setup_main())
     if sys.argv[1:2] == ["--install-help"]:
         raise SystemExit(setup_main(["--help"]))
+    if sys.argv[1:2] == ["--gui-smoke-test"]:
+        import tkinter as tk
+        from pi_media_hub.gui import MediaHubApp
+        root = tk.Tk()
+        root.withdraw()
+        MediaHubApp(root)
+        root.update_idletasks()
+        root.destroy()
+        return
     gui_main()
 
 
