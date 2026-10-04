@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tests -v
+        env:
+          PYTHONPATH: src
+      - run: python -m compileall -q src device tests tools
+
+  appimage:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+            appimage_arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            appimage_arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install PyInstaller esptool pyserial sounddevice
+      - run: sudo apt-get update && sudo apt-get install -y xvfb libportaudio2
+      - name: Install appimagetool
+        run: |
+          curl -fsSL "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${{ matrix.appimage_arch }}.AppImage" -o appimagetool
+          chmod +x appimagetool
+      - name: Build AppImage
+        env:
+          APPIMAGETOOL: ${{ github.workspace }}/appimagetool
+        run: scripts/build_appimage.sh "${{ matrix.arch }}"
+      - name: Smoke-test bundled desktop GUI
+        run: xvfb-run -a env APPIMAGE_EXTRACT_AND_RUN=1 "dist/pi-media-hub-${{ matrix.arch }}.AppImage" --gui-smoke-test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-media-hub-${{ matrix.arch }}
+          path: dist/*.AppImage

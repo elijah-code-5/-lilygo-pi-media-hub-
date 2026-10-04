@@ -1,0 +1,18 @@
+"""Adapter contract for a board-specific MicroPython display/touch driver.
+
+Copy to t_hmi_adapter.py on the device and implement show() and read_key()
+using the display and touch modules installed for the exact T-HMI revision.
+"""
+
+
+def show(lines):
+    # Replace with display.clear() and display.draw_text(...) for your driver.
+    print("[T-HMI DISPLAY]")
+    for line in lines:
+        print(line)
+
+
+def read_key():
+    # Return "up", "down", "select", "back", or None.
+    # Replace with touch-coordinate/button handling for your board revision.
+    return None
