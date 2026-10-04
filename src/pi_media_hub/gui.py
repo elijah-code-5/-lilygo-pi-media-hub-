@@ -503,7 +503,7 @@ class MediaHubApp:
         left.pack(side="left", fill="y", padx=(0, 10))
         ttk.Button(left, text="New note", command=self.create_note).pack(fill="x", pady=(0, 6))
         ttk.Button(left, text="Delete note", command=self.delete_note).pack(fill="x", pady=(0, 8))
-        self.notes_tree = ttk.Treeview(left, columns=("title",), show="headings", width=28)
+        self.notes_tree = ttk.Treeview(left, columns=("title",), show="headings")
         self.notes_tree.heading("title", text="Your notes")
         self.notes_tree.column("title", width=210)
         self.notes_tree.pack(fill="both", expand=True)
