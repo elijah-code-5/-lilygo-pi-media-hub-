@@ -14,10 +14,12 @@ def main():
         from pi_media_hub.gui import MediaHubApp
         import esptool
         from serial.tools import list_ports
+        import sounddevice
 
         if not callable(esptool.main):
             raise RuntimeError("Bundled esptool API is unavailable")
         list_ports.comports()
+        sounddevice.query_devices()
         root = tk.Tk()
         root.withdraw()
         MediaHubApp(root)

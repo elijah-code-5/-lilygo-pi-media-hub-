@@ -5,10 +5,12 @@ import io
 import json
 import os
 import platform
+import queue
 import re
 import secrets
 import threading
 import tempfile
+import time
 import tkinter as tk
 import webbrowser
 from pathlib import Path
@@ -16,6 +18,25 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
+
+from .local_apps import (
+    WavRecorder,
+    default_notes_path,
+    load_notes,
+    new_note,
+    normalize_browser_url,
+    save_notes,
+)
+from .robot import (
+    MAX_PULSE_MS,
+    check_adapter,
+    load_firmware_package,
+    normalize_robot_url,
+    send_control,
+    send_stop,
+    upload_firmware,
+    validate_program,
+)
 
 
 DEFAULT_SERVER = "http://raspberrypi.local:8765"
@@ -132,7 +153,20 @@ def request_json(base_url: str, path: str, body: object | None = None, *, token:
 
 
 class MediaHubApp:
-    PAGES = ("Overview", "Media library", "App shelf", "Local AI", "T-HMI")
+    PAGES = (
+        "Overview",
+        "Music",
+        "Videos",
+        "Media library",
+        "Recorder",
+        "Browser",
+        "Notebook",
+        "Assistant",
+        "App shelf",
+        "Robot",
+        "T-HMI",
+        "Setup",
+    )
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -153,6 +187,28 @@ class MediaHubApp:
         self.detected_ports = set()
         self.serial_connection = None
         self.serial_reader = None
+        self.media_views = {}
+        self.notes = []
+        self.active_note_id = None
+        self.note_save_after = None
+        self.recorder = None
+        self.recording_path = tk.StringVar(value=str(Path.home() / "Music" / "Recording.wav"))
+        self.recording_status = tk.StringVar(value="Ready to record locally on this computer.")
+        self.browser_address = tk.StringVar(value="https://")
+        self.robot_address = tk.StringVar(value=self.settings.get("robot_url", ""))
+        self.robot_board = tk.StringVar(value=self.settings.get("robot_board", ""))
+        self.robot_token = tk.StringVar(value=self.settings.get("robot_token", ""))
+        self.robot_status = tk.StringVar(value="No verified robot adapter connected.")
+        self.robot_adapter_verified = False
+        self.robot_firmware_path = tk.StringVar()
+        self.robot_program_text = None
+        self.robot_jobs = queue.Queue()
+        self.robot_worker_active = False
+        self.robot_worker_lock = threading.Lock()
+        self.robot_cancel_event = threading.Event()
+        self.closing = False
+        self.note_title = None
+        self.note_body = None
         self._style()
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -220,6 +276,13 @@ class MediaHubApp:
         self._build_apps()
         self._build_ai()
         self._build_firmware()
+        self._build_media_collection("Music", "audio")
+        self._build_media_collection("Videos", "video")
+        self._build_recorder()
+        self._build_browser()
+        self._build_notebook()
+        self._build_robot()
+        self._build_setup()
         self.show_page("Overview")
 
     def _card(self, parent, title, value, column):
@@ -288,6 +351,33 @@ class MediaHubApp:
         self.media_empty = ttk.Label(page, text="Connect to the Pi to load your library.", style="Muted.TLabel")
         self.media_empty.pack(anchor="w", pady=8)
 
+    def _build_media_collection(self, name, kind):
+        page = self._new_page(name)
+        ttk.Label(
+            page,
+            text=f"Browse and open {kind} stored on the Raspberry Pi.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(0, 12))
+        actions = ttk.Frame(page)
+        actions.pack(fill="x", pady=(0, 10))
+        ttk.Button(actions, text="Refresh", command=lambda k=kind: self.load_media_collection(k)).pack(side="left")
+        ttk.Button(
+            actions,
+            text="Play / open selected",
+            style="Accent.TButton",
+            command=lambda k=kind: self.open_media_collection_item(k),
+        ).pack(side="left", padx=8)
+        tree = self._tree(
+            page,
+            ("name", "size", "folder"),
+            ("Title", "Size", "Folder"),
+            (330, 110, 330),
+        )
+        tree.bind("<Double-1>", lambda _event, k=kind: self.open_media_collection_item(k))
+        empty = ttk.Label(page, text=f"Connect to the Pi to browse {kind}.", style="Muted.TLabel")
+        empty.pack(anchor="w", pady=8)
+        self.media_views[kind] = {"tree": tree, "empty": empty, "items": []}
+
     def _build_apps(self):
         page = self._new_page("App shelf")
         ttk.Label(page, text="Curate shortcuts to trusted web apps. Imported entries do not run code on the Pi.", style="Muted.TLabel", wraplength=800).pack(anchor="w", pady=(0, 12))
@@ -316,7 +406,7 @@ class MediaHubApp:
         ttk.Label(parent, text="Get the token from /etc/pi-media-hub/config.json on the Pi. Stored locally with owner-only permissions.", style="Muted.TLabel").pack(anchor="w", pady=(5, 0))
 
     def _build_ai(self):
-        page = self._new_page("Local AI")
+        page = self._new_page("Assistant")
         ttk.Label(page, text="Connect the Pi to a local model service—Ollama, an OpenAI-compatible server, or your own HTTP backend.", style="Muted.TLabel", wraplength=850).pack(anchor="w", pady=(0, 12))
         settings = ttk.Frame(page, style="Card.TFrame", padding=14)
         settings.pack(fill="x", pady=(0, 12))
@@ -347,6 +437,210 @@ class MediaHubApp:
         entry = ttk.Entry(row, textvariable=variable)
         entry.pack(side="left", fill="x", expand=True)
         ttk.Label(row, text=placeholder, style="Muted.TLabel").pack(side="right", padx=(6, 0))
+
+    def _build_recorder(self):
+        page = self._new_page("Recorder")
+        ttk.Label(page, text="Voice recorder", style="Hero.TLabel").pack(anchor="w")
+        ttk.Label(
+            page,
+            text="Record microphone input on this controller and save a standard WAV file. Nothing is uploaded to the Pi.",
+            style="Muted.TLabel",
+            wraplength=850,
+        ).pack(anchor="w", pady=(8, 16))
+        panel = ttk.Frame(page, style="Card.TFrame", padding=18)
+        panel.pack(fill="x")
+        row = ttk.Frame(panel, style="Card.TFrame")
+        row.pack(fill="x")
+        ttk.Entry(row, textvariable=self.recording_path).pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="Choose file…", command=self.choose_recording_path).pack(side="left", padx=(8, 0))
+        self.record_button = ttk.Button(
+            panel,
+            text="Start recording",
+            style="Accent.TButton",
+            command=self.toggle_recording,
+        )
+        self.record_button.pack(anchor="w", pady=(14, 6))
+        ttk.Label(panel, textvariable=self.recording_status, style="Muted.TLabel", wraplength=850).pack(anchor="w")
+        ttk.Label(
+            page,
+            text="Uses the selected/default system microphone. If no input device is available, check Linux microphone permissions and audio services.",
+            style="Muted.TLabel",
+            wraplength=850,
+        ).pack(anchor="w", pady=12)
+
+    def _build_browser(self):
+        page = self._new_page("Browser")
+        ttk.Label(page, text="Open a website", style="Hero.TLabel").pack(anchor="w")
+        ttk.Label(
+            page,
+            text="This opens your address in the computer's default browser; it is not an embedded web engine.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(8, 16))
+        row = ttk.Frame(page, style="Card.TFrame", padding=14)
+        row.pack(fill="x")
+        address = ttk.Entry(row, textvariable=self.browser_address)
+        address.pack(side="left", fill="x", expand=True)
+        address.bind("<Return>", lambda _event: self.open_browser_address())
+        ttk.Button(row, text="Open", style="Accent.TButton", command=self.open_browser_address).pack(side="left", padx=(8, 0))
+        ttk.Label(
+            page,
+            text="For Pi apps, use App Shelf. App pages are sandboxed static web assets; native programs are not executed by the Pi server.",
+            style="Muted.TLabel",
+            wraplength=850,
+        ).pack(anchor="w", pady=12)
+
+    def _build_notebook(self):
+        page = self._new_page("Notebook")
+        ttk.Label(page, text="Notebook", style="Hero.TLabel").pack(anchor="w")
+        ttk.Label(
+            page,
+            text="Private notes saved on this controller. Use text and Markdown; this is not a stylus/ink notebook.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(8, 12))
+        body = ttk.Frame(page)
+        body.pack(fill="both", expand=True)
+        left = ttk.Frame(body, style="Card.TFrame", padding=8)
+        left.pack(side="left", fill="y", padx=(0, 10))
+        ttk.Button(left, text="New note", command=self.create_note).pack(fill="x", pady=(0, 6))
+        ttk.Button(left, text="Delete note", command=self.delete_note).pack(fill="x", pady=(0, 8))
+        self.notes_tree = ttk.Treeview(left, columns=("title",), show="headings", width=28)
+        self.notes_tree.heading("title", text="Your notes")
+        self.notes_tree.column("title", width=210)
+        self.notes_tree.pack(fill="both", expand=True)
+        self.notes_tree.bind("<<TreeviewSelect>>", self.select_note)
+        editor = ttk.Frame(body, style="Card.TFrame", padding=12)
+        editor.pack(side="left", fill="both", expand=True)
+        self.note_title_var = tk.StringVar()
+        title = ttk.Entry(editor, textvariable=self.note_title_var, font=("Sans", 14, "bold"))
+        title.pack(fill="x", pady=(0, 8))
+        title.bind("<KeyRelease>", self.note_edited)
+        self.note_body = tk.Text(
+            editor,
+            bg=COLORS["surface"],
+            fg=COLORS["text"],
+            insertbackground=COLORS["text"],
+            relief="flat",
+            wrap="word",
+            padx=12,
+            pady=12,
+        )
+        self.note_body.pack(fill="both", expand=True)
+        self.note_body.bind("<<Modified>>", self.note_body_modified)
+        ttk.Button(editor, text="Save note", command=self.save_current_note).pack(anchor="e", pady=(8, 0))
+        self._load_notes_into_ui()
+
+    def _build_robot(self):
+        page = self._new_page("Robot")
+        ttk.Label(page, text="Robot workshop", style="Hero.TLabel").pack(anchor="w")
+        ttk.Label(
+            page,
+            text="Manual pulses, bounded programs, and checksum-checked Wi-Fi updates for a compatible ESP32 adapter.",
+            style="Muted.TLabel",
+            wraplength=850,
+        ).pack(anchor="w", pady=(8, 12))
+        connection = ttk.Frame(page, style="Card.TFrame", padding=12)
+        connection.pack(fill="x", pady=(0, 10))
+        ttk.Label(connection, text="Robot adapter address").pack(side="left")
+        ttk.Entry(connection, textvariable=self.robot_address, width=32).pack(side="left", padx=8)
+        ttk.Label(connection, text="Board profile").pack(side="left", padx=(8, 0))
+        ttk.Entry(connection, textvariable=self.robot_board, width=20).pack(side="left", padx=8)
+        ttk.Label(connection, text="Adapter token").pack(side="left", padx=(4, 0))
+        ttk.Entry(connection, textvariable=self.robot_token, width=16, show="•").pack(side="left", padx=8)
+        ttk.Button(connection, text="Verify adapter", command=self.verify_robot_adapter).pack(side="left")
+        ttk.Label(page, textvariable=self.robot_status, style="Muted.TLabel", wraplength=850).pack(anchor="w", pady=(0, 10))
+
+        control = ttk.Frame(page, style="Card.TFrame", padding=14)
+        control.pack(fill="x", pady=(0, 10))
+        ttk.Label(control, text="MANUAL • finite movement pulse, maximum 400 ms", style="CardTitle.TLabel").pack(anchor="w", pady=(0, 8))
+        pad = ttk.Frame(control, style="Card.TFrame")
+        pad.pack()
+        for label, command, row, column in (
+            ("Forward", "forward", 0, 1),
+            ("Left", "left", 1, 0),
+            ("STOP", "stop", 1, 1),
+            ("Right", "right", 1, 2),
+            ("Reverse", "backward", 2, 1),
+        ):
+            button = ttk.Button(
+                pad,
+                text=label,
+                style="Accent.TButton" if command == "stop" else "TButton",
+                command=lambda c=command: self.robot_action("stop") if c == "stop" else None,
+            )
+            button.grid(row=row, column=column, padx=4, pady=4, sticky="nsew")
+            if command != "stop":
+                button.bind("<ButtonPress-1>", lambda _event, c=command: self.robot_action(c, MAX_PULSE_MS))
+                button.bind("<ButtonRelease-1>", lambda _event: self.robot_action("stop"))
+        ttk.Label(
+            control,
+            text="Device-side watchdog is mandatory. Controls remain disabled until a compatible adapter reports its stop capability.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(8, 0))
+
+        programming = ttk.LabelFrame(page, text="Program (JSON steps, no code execution)", padding=10)
+        programming.pack(fill="both", expand=True, pady=(0, 10))
+        self.robot_program_text = tk.Text(
+            programming,
+            height=5,
+            bg=COLORS["surface"],
+            fg=COLORS["text"],
+            insertbackground=COLORS["text"],
+            relief="flat",
+            wrap="none",
+        )
+        self.robot_program_text.pack(fill="both", expand=True)
+        self.robot_program_text.insert(
+            "1.0",
+            '[{"command":"forward","duration_ms":150},{"command":"right","duration_ms":120}]',
+        )
+        program_bar = ttk.Frame(programming)
+        program_bar.pack(fill="x", pady=(8, 0))
+        ttk.Button(program_bar, text="Run bounded program…", command=self.run_robot_program).pack(side="left")
+        ttk.Button(program_bar, text="Stop now", style="Accent.TButton", command=lambda: self.robot_action("stop")).pack(side="left", padx=8)
+
+        firmware = ttk.LabelFrame(page, text="Wi-Fi OTA update", padding=10)
+        firmware.pack(fill="x")
+        ttk.Entry(firmware, textvariable=self.robot_firmware_path).pack(side="left", fill="x", expand=True)
+        ttk.Button(firmware, text="Choose firmware ZIP…", command=self.choose_robot_firmware).pack(side="left", padx=6)
+        ttk.Button(firmware, text="Verify & update…", command=self.update_robot_firmware).pack(side="left")
+        ttk.Label(
+            page,
+            text="Face tracking, kit-specific pins, stock Freenove control, and board firmware builds are not enabled without the exact kit/camera and tested firmware. OTA requires the selected adapter's fixed endpoint.",
+            style="Muted.TLabel",
+            wraplength=850,
+        ).pack(anchor="w", pady=(10, 0))
+
+    def _build_setup(self):
+        page = self._new_page("Setup")
+        ttk.Label(page, text="Host & app setup", style="Hero.TLabel").pack(anchor="w")
+        ttk.Label(
+            page,
+            text="The Raspberry Pi hosts media, static apps, and AI proxy settings. This panel helps with setup but never writes an OS image or executes remote shell commands.",
+            style="Muted.TLabel",
+            wraplength=850,
+        ).pack(anchor="w", pady=(8, 14))
+        panel = ttk.Frame(page, style="Card.TFrame", padding=16)
+        panel.pack(fill="x")
+        ttk.Label(panel, text="1 · Install Raspberry Pi OS", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            panel,
+            text="Use Raspberry Pi Imager on the SD card/USB drive, then boot the Pi and connect it to your trusted LAN. OS imaging is destructive and intentionally stays in the official Imager.",
+            wraplength=850,
+        ).pack(anchor="w", pady=6)
+        ttk.Button(panel, text="Open Raspberry Pi Imager download page", command=lambda: webbrowser.open("https://www.raspberrypi.com/software/")).pack(anchor="w", pady=(0, 12))
+        ttk.Label(panel, text="2 · Install the Pi Media Hub server", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            panel,
+            text="Copy the ARM64 AppImage to the Pi and run its documented `install` command once. It installs the Python service and systemd unit; it does not install the OS or issue shell commands from this controller.",
+            wraplength=850,
+        ).pack(anchor="w", pady=6)
+        ttk.Label(panel, text="3 · Install apps", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            panel,
+            text="Use App Shelf to create shortcuts, upload a static web-app ZIP, or import a compatible GitHub repository. The Pi does not run arbitrary app code. Built-in Music, Videos, Recorder, Browser, Notebook, Assistant, and Robot tools are part of this desktop app.",
+            wraplength=850,
+        ).pack(anchor="w", pady=6)
+        ttk.Button(panel, text="Open Pi Media Hub setup guide", command=lambda: webbrowser.open("https://github.com/elijah-code-5/-lilygo-pi-media-hub-/blob/elijah-code-5-pi-media-hub-mvp/README.md")).pack(anchor="w", pady=(6, 0))
 
     def _build_firmware(self):
         page = self._new_page("T-HMI")
@@ -442,9 +736,352 @@ class MediaHubApp:
         for child in self.page_host.winfo_children():
             child.pack_forget()
         self.pages[name].pack(fill="both", expand=True)
+        if name == "Music":
+            self.load_media_collection("audio")
+        elif name == "Videos":
+            self.load_media_collection("video")
+        elif name == "Notebook":
+            self._refresh_notes_tree()
+
+    def open_browser_address(self):
+        try:
+            address = normalize_browser_url(self.browser_address.get())
+        except ValueError as error:
+            messagebox.showerror("Browser", str(error))
+            return
+        self.browser_address.set(address)
+        if not webbrowser.open(address):
+            messagebox.showerror("Browser", "Could not open the system browser.")
+
+    def choose_recording_path(self):
+        selected = filedialog.asksaveasfilename(
+            defaultextension=".wav",
+            initialfile="Recording.wav",
+            filetypes=(("WAV audio", "*.wav"),),
+        )
+        if selected:
+            self.recording_path.set(selected)
+
+    def toggle_recording(self):
+        if self.recorder and self.recorder.recording:
+            try:
+                self.recorder.stop()
+                self.recording_status.set(f"Saved recording: {self.recorder.path}")
+                self.record_button.configure(text="Start recording")
+            except Exception as error:
+                self.recording_status.set(f"Could not finish recording: {error}")
+            finally:
+                self.recorder = None
+            return
+        path = Path(self.recording_path.get()).expanduser()
+        if path.suffix.lower() != ".wav":
+            messagebox.showerror("Recorder", "Choose a .wav output file.")
+            return
+        self.recorder = WavRecorder(path)
+        try:
+            self.recorder.start()
+        except (OSError, RuntimeError) as error:
+            self.recorder = None
+            self.recording_status.set(str(error))
+            messagebox.showerror("Recorder", str(error))
+            return
+        self.recording_status.set(f"Recording to {path} — select Stop when done.")
+        self.record_button.configure(text="Stop recording")
+
+    def _load_notes_into_ui(self):
+        try:
+            self.notes = load_notes()
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Notebook", str(error))
+            self.notes = []
+        self._refresh_notes_tree()
+
+    def _refresh_notes_tree(self):
+        self.notes_tree.delete(*self.notes_tree.get_children())
+        for note in self.notes:
+            self.notes_tree.insert("", "end", iid=note["id"], values=(note["title"] or "Untitled note",))
+
+    def _active_note(self):
+        return next((note for note in self.notes if note["id"] == self.active_note_id), None)
+
+    def save_current_note(self):
+        note = self._active_note()
+        if not note:
+            return
+        title = self.note_title_var.get().strip()[:200] or "Untitled note"
+        note["title"] = title
+        note["body"] = self.note_body.get("1.0", "end-1c")
+        from datetime import datetime, timezone
+
+        note["updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            save_notes(self.notes)
+        except (OSError, ValueError) as error:
+            self.set_status("Notebook save failed: " + str(error))
+            return
+        if self.notes_tree.exists(note["id"]):
+            self.notes_tree.item(note["id"], values=(note["title"],))
+        self.set_status("Note saved on this computer.")
+
+    def note_edited(self, _event=None):
+        if self.note_save_after is not None:
+            self.root.after_cancel(self.note_save_after)
+        self.note_save_after = self.root.after(800, self.save_current_note)
+
+    def note_body_modified(self, _event=None):
+        if self.note_body.edit_modified():
+            self.note_body.edit_modified(False)
+            self.note_edited()
+
+    def select_note(self, _event=None):
+        selection = self.notes_tree.selection()
+        if not selection:
+            return
+        selected_id = selection[0]
+        if self.active_note_id == selected_id:
+            return
+        self.save_current_note()
+        note = next((item for item in self.notes if item["id"] == selected_id), None)
+        if not note:
+            return
+        self.active_note_id = note["id"]
+        self.note_title_var.set(note["title"])
+        self.note_body.delete("1.0", "end")
+        self.note_body.insert("1.0", note["body"])
+        self.note_body.edit_modified(False)
+
+    def create_note(self):
+        self.save_current_note()
+        note = new_note()
+        self.notes.insert(0, note)
+        self.active_note_id = note["id"]
+        try:
+            save_notes(self.notes)
+        except (OSError, ValueError) as error:
+            self.notes.remove(note)
+            self.active_note_id = None
+            messagebox.showerror("Notebook", str(error))
+            return
+        self._refresh_notes_tree()
+        self.notes_tree.selection_set(note["id"])
+        self.note_title_var.set(note["title"])
+        self.note_body.delete("1.0", "end")
+        self.note_body.edit_modified(False)
+
+    def delete_note(self):
+        note = self._active_note()
+        if not note:
+            return
+        if not messagebox.askyesno("Delete note", f"Delete {note['title']} from this computer?"):
+            return
+        self.notes.remove(note)
+        self.active_note_id = None
+        try:
+            save_notes(self.notes)
+        except (OSError, ValueError) as error:
+            self.notes.append(note)
+            messagebox.showerror("Notebook", str(error))
+            return
+        self._refresh_notes_tree()
+        self.note_title_var.set("")
+        self.note_body.delete("1.0", "end")
+
+    def verify_robot_adapter(self):
+        address = self.robot_address.get().strip()
+        try:
+            address = normalize_robot_url(address)
+        except ValueError as error:
+            messagebox.showerror("Robot", str(error))
+            return
+        token = self.robot_token.get().strip()
+        if not token:
+            messagebox.showerror("Robot", "Enter the adapter's bearer token before connecting.")
+            return
+        board = self.robot_board.get().strip()
+        if not board:
+            messagebox.showerror("Robot", "Enter the exact board profile identifier reported by the robot adapter.")
+            return
+        self.robot_address.set(address)
+        self.robot_adapter_verified = False
+        self.robot_status.set("Checking profile and stop watchdog…")
+
+        def verified(result):
+            self.robot_adapter_verified = True
+            self.robot_status.set(
+                f"Verified {result.get('board', 'robot')} • firmware {result.get('version', 'unknown')} • "
+                f"stop watchdog {result['motor_watchdog_ms']} ms."
+            )
+            self.settings.update({
+                "robot_url": address,
+                "robot_board": self.robot_board.get().strip(),
+                "robot_token": token,
+            })
+            try:
+                save_controller_settings(self.settings)
+            except OSError as error:
+                self.set_status("Robot settings save failed: " + str(error))
+
+        self._async(lambda: check_adapter(address, token, board), verified)
+
+    def _robot_async(self, action, success):
+        self.robot_jobs.put((action, success))
+        with self.robot_worker_lock:
+            if self.robot_worker_active:
+                return
+            self.robot_worker_active = True
+
+        def run_queue():
+            while True:
+                try:
+                    current_action, on_success = self.robot_jobs.get_nowait()
+                except queue.Empty:
+                    with self.robot_worker_lock:
+                        self.robot_worker_active = False
+                        if self.robot_jobs.empty():
+                            return
+                        self.robot_worker_active = True
+                    continue
+                try:
+                    result = current_action()
+                except Exception as error:
+                    if not self.closing:
+                        self.root.after(0, lambda error=error: self.robot_status.set(str(error)))
+                else:
+                    if not self.closing:
+                        self.root.after(0, lambda result=result, callback=on_success: callback(result))
+                finally:
+                    self.robot_jobs.task_done()
+
+        threading.Thread(target=run_queue, daemon=True).start()
+
+    def robot_action(self, command, duration_ms=200):
+        address = self.robot_address.get().strip()
+        if command != "stop" and not self.robot_adapter_verified:
+            self.robot_status.set("Verify a compatible adapter before moving.")
+            return
+        if not address:
+            self.robot_status.set("Enter the robot adapter address.")
+            return
+        token = self.robot_token.get().strip()
+        if not token:
+            self.robot_status.set("Enter the robot adapter token.")
+            return
+        if command == "stop":
+            self.robot_cancel_event.set()
+            while True:
+                try:
+                    self.robot_jobs.get_nowait()
+                except queue.Empty:
+                    break
+                else:
+                    self.robot_jobs.task_done()
+            self._async(
+                lambda: send_stop(address, token=token),
+                lambda _result: self.robot_status.set("STOP acknowledged."),
+            )
+            return
+
+        def move():
+            try:
+                return send_control(address, command, duration_ms, token=token)
+            except Exception as error:
+                try:
+                    send_stop(address, token=token)
+                except Exception as stop_error:
+                    raise RuntimeError(f"{error}; emergency stop was not acknowledged: {stop_error}") from error
+                raise RuntimeError(f"{error}; emergency stop was acknowledged.") from error
+
+        self._robot_async(move, lambda _result: self.robot_status.set(f"{command.title()} pulse sent ({duration_ms} ms)."))
+
+    def run_robot_program(self):
+        if not self.robot_adapter_verified:
+            self.robot_status.set("Verify a compatible adapter before running a program.")
+            return
+        try:
+            steps = validate_program(json.loads(self.robot_program_text.get("1.0", "end-1c")))
+        except (json.JSONDecodeError, ValueError) as error:
+            messagebox.showerror("Robot program", str(error))
+            return
+        total = sum(step["duration_ms"] for step in steps)
+        if not messagebox.askyesno(
+            "Run robot program",
+            f"Send {len(steps)} bounded movement pulse(s) totalling at most {total} ms? "
+            "A STOP command will be sent afterward.",
+            icon="warning",
+        ):
+            return
+        self.robot_cancel_event.clear()
+        address = self.robot_address.get().strip()
+        token = self.robot_token.get().strip()
+
+        def execute():
+            try:
+                for step in steps:
+                    if self.robot_cancel_event.is_set():
+                        break
+                    send_control(
+                        address,
+                        step["command"],
+                        step["duration_ms"],
+                        token=token,
+                    )
+                    if self.robot_cancel_event.wait(step["duration_ms"] / 1000):
+                        break
+            finally:
+                send_stop(address, token=token)
+            return True
+
+        self._robot_async(execute, lambda _result: self.robot_status.set("Program complete; STOP acknowledged."))
+
+    def choose_robot_firmware(self):
+        selected = filedialog.askopenfilename(
+            filetypes=(("Robot firmware package", "*.zip"), ("ZIP archive", "*.zip"))
+        )
+        if selected:
+            self.robot_firmware_path.set(selected)
+
+    def update_robot_firmware(self):
+        if not self.robot_adapter_verified:
+            self.robot_status.set("Verify a compatible adapter before OTA.")
+            return
+        path = Path(self.robot_firmware_path.get()).expanduser()
+        try:
+            firmware = load_firmware_package(path, self.robot_board.get().strip())
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Robot firmware", str(error))
+            return
+        if not messagebox.askyesno(
+            "Confirm robot OTA update",
+            f"Send version {firmware['version']} to board {firmware['board']}?\n"
+            f"SHA-256: {firmware['sha256']}\n\n"
+            "The robot must advertise the fixed OTA endpoint and motor-stop watchdog.",
+            icon="warning",
+        ):
+            return
+        self.robot_status.set("Uploading verified firmware; keep robot power connected…")
+        address = self.robot_address.get().strip()
+        token = self.robot_token.get().strip()
+
+        def done(result):
+            self.robot_status.set(f"OTA {result.get('status')} • {firmware['version']}.")
+
+        self._robot_async(
+            lambda: upload_firmware(
+                address,
+                firmware,
+                token=token,
+            ),
+            done,
+        )
 
     def persist_settings(self):
-        self.settings.update({"server_url": self.server_url.get(), "admin_token": self.admin_token.get()})
+        self.settings.update({
+            "server_url": self.server_url.get(),
+            "admin_token": self.admin_token.get(),
+            "robot_url": self.robot_address.get(),
+            "robot_board": self.robot_board.get(),
+            "robot_token": self.robot_token.get(),
+        })
         try:
             save_controller_settings(self.settings)
             self.set_status("Connection settings saved on this computer.")
@@ -474,6 +1111,8 @@ class MediaHubApp:
             self.apps_card.configure(text=str(result.get("apps", "—")))
             self.set_status(f"Connected • {result.get('name', 'Pi Media Hub')}")
             self.load_library()
+            self.load_media_collection("audio")
+            self.load_media_collection("video")
             self.load_apps()
             self._load_ai_settings()
         self._async(lambda: request_json(normalize_server_url(self.server_url.get()), "/api/status"), complete)
@@ -485,6 +1124,41 @@ class MediaHubApp:
             lambda: request_json(normalize_server_url(self.server_url.get()), "/api/library?" + query),
             self._show_library,
         )
+
+    def load_media_collection(self, kind):
+        from urllib.parse import urlencode
+
+        query = urlencode({"kind": kind, "q": ""})
+        self._async(
+            lambda: request_json(normalize_server_url(self.server_url.get()), "/api/library?" + query),
+            lambda result, k=kind: self._show_media_collection(k, result),
+        )
+
+    def _show_media_collection(self, kind, result):
+        view = self.media_views[kind]
+        view["items"] = result.get("items", [])
+        tree = view["tree"]
+        tree.delete(*tree.get_children())
+        for index, item in enumerate(view["items"]):
+            tree.insert(
+                "",
+                "end",
+                iid=str(index),
+                values=(
+                    item.get("name"),
+                    f"{item.get('size', 0) / 1_048_576:.1f} MB",
+                    str(Path(item.get("path", "")).parent),
+                ),
+            )
+        view["empty"].configure(text=f"{len(view['items'])} {kind} items on the Pi.")
+
+    def open_media_collection_item(self, kind):
+        view = self.media_views[kind]
+        selection = view["tree"].selection()
+        if not selection:
+            return
+        item = view["items"][int(selection[0])]
+        webbrowser.open(normalize_server_url(self.server_url.get()) + item["url"])
 
     def _show_library(self, result):
         self.media_items = result.get("items", [])
@@ -816,6 +1490,25 @@ class MediaHubApp:
         self.serial_output.see("end")
 
     def close(self):
+        self.closing = True
+        self.robot_cancel_event.set()
+        while True:
+            try:
+                self.robot_jobs.get_nowait()
+            except queue.Empty:
+                break
+            else:
+                self.robot_jobs.task_done()
+        if self.recorder and self.recorder.recording:
+            try:
+                self.recorder.stop()
+            except Exception as error:
+                messagebox.showwarning("Recorder", f"Could not close recording cleanly: {error}")
+        if self.robot_adapter_verified:
+            try:
+                send_stop(self.robot_address.get().strip(), token=self.robot_token.get().strip())
+            except Exception as error:
+                messagebox.showwarning("Robot stop", f"Could not confirm STOP before exit: {error}")
         if self.serial_connection is not None:
             self.serial_connection.close()
         if self.local_server is not None:

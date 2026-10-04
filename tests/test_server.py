@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import wave
 import zipfile
 from unittest.mock import patch
 from http.client import HTTPConnection
@@ -20,6 +21,17 @@ from pi_media_hub.gui import (
     normalize_ai_endpoint,
     normalize_server_url,
     save_controller_settings,
+)
+from pi_media_hub.local_apps import WavRecorder, load_notes, new_note, normalize_browser_url, save_notes
+from pi_media_hub.robot import (
+    build_control_payload,
+    check_adapter,
+    load_firmware_package,
+    normalize_robot_url,
+    send_control,
+    send_stop,
+    upload_firmware,
+    validate_program,
 )
 
 
@@ -55,6 +67,140 @@ class GuiTests(unittest.TestCase):
             settings_path = Path(directory) / "pi-media-hub/controller.json"
             self.assertEqual(json.loads(settings_path.read_text())["server_url"], "http://pi.local:8765")
             self.assertEqual(settings_path.stat().st_mode & 0o777, 0o600)
+
+    def test_browser_address_validation(self):
+        self.assertEqual(normalize_browser_url("example.org/path"), "https://example.org/path")
+        self.assertEqual(normalize_browser_url("http://127.0.0.1:8080"), "http://127.0.0.1:8080")
+        for invalid in ("", "ftp://example.org", "https://user:pass@example.org", "http://[bad"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                normalize_browser_url(invalid)
+
+    def test_notebook_persistence_is_private(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "notes.json"
+            note = new_note("Plan")
+            note["body"] = "A private note"
+            save_notes([note], path)
+            self.assertEqual(load_notes(path), [note])
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            with self.assertRaises(ValueError):
+                save_notes([{"id": "bad"}], path)
+
+    def test_recorder_writes_private_wav_with_mock_audio_device(self):
+        import types
+
+        class FakeStream:
+            def __init__(self, *, callback, **_kwargs):
+                self.callback = callback
+
+            def start(self):
+                self.callback(b"\0\0" * 4, 4, None, None)
+
+            def stop(self):
+                return None
+
+            def close(self):
+                return None
+
+        fake_sounddevice = types.SimpleNamespace(RawInputStream=FakeStream)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "recording.wav"
+            with patch.dict(sys.modules, {"sounddevice": fake_sounddevice}):
+                recorder = WavRecorder(output)
+                recorder.start()
+                self.assertTrue(recorder.recording)
+                recorder.stop()
+            self.assertFalse(recorder.recording)
+            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+            with wave.open(str(output), "rb") as recording:
+                self.assertEqual(recording.getnchannels(), 1)
+                self.assertEqual(recording.getframerate(), 44100)
+                self.assertEqual(recording.getnframes(), 4)
+
+    def test_robot_address_and_finite_control_are_restricted(self):
+        self.assertEqual(normalize_robot_url("http://192.168.1.12:8080"), "http://192.168.1.12:8080")
+        self.assertEqual(build_control_payload("forward", 200), {"command": "forward", "duration_ms": 200})
+        self.assertEqual(build_control_payload("stop"), {"command": "stop", "duration_ms": 0})
+        for address in ("http://example.org", "http://192.168.1.12/path", "http://user@192.168.1.12"):
+            with self.subTest(address=address), self.assertRaises(ValueError):
+                normalize_robot_url(address)
+        for command, duration in (("run", 100), ("forward", 0), ("backward", 401), ("left", True)):
+            with self.subTest(command=command, duration=duration), self.assertRaises(ValueError):
+                build_control_payload(command, duration)
+
+    def test_robot_program_is_bounded_to_fixed_commands(self):
+        steps = validate_program([
+            {"command": "forward", "duration_ms": 200},
+            {"command": "stop", "duration_ms": 0},
+            {"command": "left", "duration_ms": 300},
+        ])
+        self.assertEqual(len(steps), 2)
+        for invalid in (
+            [{"command": "forward", "duration_ms": 3000}, {"command": "backward", "duration_ms": 3000}],
+            [{"command": "shell", "duration_ms": 100}],
+            [{"command": "stop", "duration_ms": 0}],
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                validate_program(invalid)
+
+    def test_robot_api_requires_authenticated_safe_profile_and_stop(self):
+        import io
+
+        status = {
+            "profile": "pi-media-hub-robot-v1",
+            "board": "freenove-custom-v1",
+            "version": "1.0.0",
+            "motor_stop": True,
+            "motor_watchdog_ms": 300,
+        }
+        with patch("pi_media_hub.robot.urlopen") as open_url:
+            open_url.return_value.__enter__.return_value = io.BytesIO(json.dumps(status).encode())
+            self.assertEqual(
+                check_adapter("http://192.168.1.10:80", "a" * 24, "freenove-custom-v1"),
+                status,
+            )
+            self.assertEqual(open_url.call_args.args[0].get_header("Authorization"), "Bearer " + "a" * 24)
+            open_url.return_value.__enter__.return_value = io.BytesIO(
+                json.dumps({"accepted": True}).encode()
+            )
+            self.assertEqual(
+                send_control("http://192.168.1.10:80", "forward", 150, token="a" * 24),
+                {"accepted": True},
+            )
+            request = open_url.call_args.args[0]
+            self.assertEqual(request.full_url, "http://192.168.1.10:80/api/control")
+            self.assertEqual(json.loads(request.data), {"command": "forward", "duration_ms": 150})
+            open_url.return_value.__enter__.return_value = io.BytesIO(
+                json.dumps({"accepted": True}).encode()
+            )
+            self.assertTrue(send_stop("http://192.168.1.10:80", token="a" * 24)["accepted"])
+        with self.assertRaisesRegex(ValueError, "token"):
+            send_stop("http://192.168.1.10:80", token="")
+
+    def test_robot_firmware_package_requires_board_and_checksum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "firmware.zip"
+            image = b"firmware-data"
+            import hashlib
+
+            manifest = {
+                "board": "freenove-custom-v1",
+                "version": "1.0.0",
+                "sha256": hashlib.sha256(image).hexdigest(),
+            }
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("pi-media-hub-robot.json", json.dumps(manifest))
+                archive.writestr("firmware.bin", image)
+            package = load_firmware_package(path, "freenove-custom-v1")
+            self.assertEqual(package["image"], image)
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                load_firmware_package(path, "other-board")
+            manifest["sha256"] = "0" * 64
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("pi-media-hub-robot.json", json.dumps(manifest))
+                archive.writestr("firmware.bin", image)
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                load_firmware_package(path, "freenove-custom-v1")
 
 
 class ServerTests(unittest.TestCase):

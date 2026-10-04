@@ -27,12 +27,23 @@ if ! python3 -m PyInstaller --version >/dev/null 2>&1; then
   echo "PyInstaller is required; install it with: python3 -m pip install pyinstaller" >&2
   exit 2
 fi
+if ! python3 -c 'import sounddevice' >/dev/null 2>&1; then
+  echo "sounddevice is required; install it with: python3 -m pip install sounddevice" >&2
+  exit 2
+fi
+portaudio="$(ldconfig -p | awk '$1 == "libportaudio.so.2" {print $NF; exit}')"
+if [[ ! -f "$portaudio" ]]; then
+  echo "PortAudio runtime is required (for example: install libportaudio2)." >&2
+  exit 2
+fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 appdir="$work/PiMediaHub.AppDir"
-mkdir -p "$appdir/usr/bin" "$appdir/usr/share/pi-media-hub" "$work/bundle/pi_media_hub"
+mkdir -p "$appdir/usr/bin" "$appdir/usr/lib" "$appdir/usr/share/pi-media-hub" "$work/bundle/pi_media_hub"
+cp -L "$portaudio" "$appdir/usr/lib/libportaudio.so.2"
+ln -s libportaudio.so.2 "$appdir/usr/lib/libportaudio.so"
 cp "$root"/src/pi_media_hub/*.py "$work/bundle/pi_media_hub/"
 
 (
@@ -43,6 +54,8 @@ cp "$root"/src/pi_media_hub/*.py "$work/bundle/pi_media_hub/"
     --add-data "$root/config.example.json:share/pi-media-hub" \
     --collect-all esptool \
     --collect-all serial \
+    --collect-all sounddevice \
+    --hidden-import sounddevice \
     --paths "$root/src" \
     --specpath "$work" \
     --distpath "$work/dist" \
@@ -54,6 +67,8 @@ cp config.example.json "$appdir/usr/share/pi-media-hub/config.example.json"
 cat > "$appdir/AppRun" <<'EOF'
 #!/usr/bin/env sh
 HERE="$(dirname "$(readlink -f "$0")")"
+export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LIBRARY_PATH="$HERE/usr/lib:${LIBRARY_PATH:-}"
 exec "$HERE/usr/bin/pi-media-hub" "$@"
 EOF
 cat > "$appdir/pi-media-hub.desktop" <<'EOF'

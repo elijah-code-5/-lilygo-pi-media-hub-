@@ -1,6 +1,6 @@
 # Pi Media Hub
 
-Pi Media Hub pairs a Raspberry Pi 5 media/server host with a desktop controller for the laptop and a MicroPython status client for the LilyGO T-HMI ESP32-S3. The controller is a GUI AppImage; it does not need a terminal for everyday browsing and control. The server is installed on the Pi, not the Arch laptop.
+Pi Media Hub pairs a Raspberry Pi 5 media/server host with a desktop controller for the laptop and a MicroPython status client for the LilyGO T-HMI ESP32-S3. The controller is a GUI AppImage; it does not need a terminal for everyday browsing and control. The server is installed on the Pi, not the Arch laptop. The desktop includes Music and Videos browser views, a local WAV microphone recorder, external browser launcher, private notes, AI chat, app shelf, T-HMI workspace, and a guarded robot-adapter preview.
 
 ## Download and launch the desktop controller
 
@@ -14,7 +14,7 @@ chmod +x ~/Downloads/pi-media-hub-x86_64.AppImage
 
 Then double-click it. If AppImage reports missing FUSE, launch from a terminal once with `APPIMAGE_EXTRACT_AND_RUN=1 ~/Downloads/pi-media-hub-x86_64.AppImage`; the AppImage still starts the GUI. The desktop session needs Tk support (included in the image) and a graphical display. The controller remembers the Pi address and admin token in `~/.config/pi-media-hub/controller.json` with owner-only file permissions.
 
-In the window, enter the Pi's LAN URL (for example `http://192.168.1.42:8765` or `http://raspberrypi.local:8765`) and connect. The Overview reports host/library/catalog status. Media Library supports audio/video/podcast filtering and search; double-click a row or choose Play/Open to stream it in your browser. App Shelf can create web shortcuts, upload a packaged app ZIP, import a compatible GitHub repository, launch, and remove entries. Local AI configures the model endpoint on the Pi and provides a basic chat panel. T-HMI detects USB serial ports, flashes a user-selected ESP32-S3 `.bin` using bundled esptool after an explicit confirmation, and provides a serial REPL console.
+In the window, enter the Pi's LAN URL (for example `http://192.168.1.42:8765` or `http://raspberrypi.local:8765`) and connect. The Overview reports host/library/catalog status. Music and Videos browse the corresponding Pi media categories and open byte-range media in the desktop's default browser. Recorder writes a standard WAV from the laptop's default microphone to a location you choose; PortAudio is bundled in the AppImage. Browser opens HTTP(S) URLs in your default browser. Notebook stores private text/Markdown notes locally with owner-only file permissions (it is not a stylus/ink notebook). Assistant configures the Pi-side backend and provides chat. App Shelf can create web shortcuts, upload a packaged static web-app ZIP, import a compatible GitHub repository, launch, and remove entries. Setup links to the official Raspberry Pi Imager and describes the Pi service/app workflow; it deliberately does not image disks or run remote shell commands. T-HMI detects USB serial ports, flashes a user-selected ESP32-S3 `.bin` using bundled esptool after an explicit confirmation, and provides a serial REPL console.
 
 ## Start the server on the Raspberry Pi
 
@@ -52,7 +52,17 @@ The server indexes common audio (`mp3`, `m4a`, `flac`, `ogg`, `wav`, and others)
 
 ## Local AI
 
-In Local AI, set an already-running backend URL and model. Supported request shapes in the controller are Ollama `/api/chat`, OpenAI-compatible `/v1/chat/completions`, and a custom JSON endpoint. Enable and save the settings on the Pi, then chat. The Pi makes outbound requests to that configured URL and stores the setting in its protected config. No model is downloaded or built by this project. A Pi 5 with 4 GB has limited capacity; use a small quantized model, reduce context, or host inference elsewhere on your trusted LAN. Model installation, performance, and compatibility depend on the backend.
+In Assistant, set an already-running backend URL and model. Supported request shapes in the controller are Ollama `/api/chat`, OpenAI-compatible `/v1/chat/completions`, and a custom JSON endpoint. Enable and save the settings on the Pi, then chat. The Pi makes outbound requests to that configured URL and stores the setting in its protected config. No model is downloaded or built by this project. A Pi 5 with 4 GB has limited capacity; use a small quantized model, reduce context, or host inference elsewhere on your trusted LAN. Model installation, performance, and compatibility depend on the backend.
+
+## Built-in apps and installing apps
+
+The desktop AppImage supplies Music, Videos, Recorder, Browser, Notebook, Assistant, Robot, and T-HMI tools. Use App Shelf for user-added Pi shortcuts and static web apps: ZIP upload and GitHub import require `pi-media-hub-app.json` and `index.html`. Imported app files are validated static assets; Pi does not execute app source or install operating-system packages. The Setup page opens the official Raspberry Pi Imager download page and gives the service-install steps. OS imaging is destructive and must be performed explicitly in Raspberry Pi Imager; remote imaging/install via this controller is not supported.
+
+## Freenove robot (adapter preview; not a stock-kit driver)
+
+Robot supports manual finite pulses, a small allowlisted JSON motion program, and an explicit-confirmation OTA upload **only** for ESP32 firmware implementing the fixed [robot adapter contract](docs/robot-adapter.md). Movement controls require a private-network address, bearer token, exact board profile, advertised stop capability, and a 100–600 ms on-device watchdog. Every motion pulse is capped at 400 ms; STOP is sent on release/program completion and on controller exit where possible. Robot updates verify a user-supplied ZIP's board ID and SHA-256, but SHA-256 is not a signature. The adapter must stop motors independently on timeout, reset, Wi-Fi loss, and OTA.
+
+No Freenove stock protocol or motor pins are guessed. No physical car can be driven until the exact kit revision/ESP32/motor-driver profile has matching adapter firmware and bench testing. Face tracking, camera support, board-specific custom firmware builds, Wi-Fi provisioning, and hardware validation are **not implemented**. The camera model/location and exact kit product details are required before those can be safely supported. Do not connect or flash a robot using an unrelated T-HMI `.bin`.
 
 ## T-HMI firmware and serial testing
 
@@ -80,14 +90,16 @@ Example server configuration is in `config.example.json`. The installer fills an
 
 The service listens on port 8765 and accepts only loopback/private-network client addresses. Keep it on a trusted LAN/VLAN, allow the port only on that LAN, and never forward it to the public internet. It has no TLS; use a trusted isolated LAN. Admin token protects write operations and AI requests. Media paths are constrained beneath the configured root, symlinked media directories are not traversed, and app ZIP extraction rejects traversal/symlinks and serves only allowlisted static asset types. The sandbox is defense-in-depth; install only apps you trust. The AI URL is an admin-controlled outbound destination.
 
-Limitations: no user accounts, multi-user permissions, browser-native codec guarantees, automatic USB flashing across all board revisions, firmware builds, remote SSH installation, or arbitrary native Pi app execution. Uploaded/GitHub apps are static browser apps, not OS packages.
+Limitations: no user accounts, multi-user permissions, browser-native codec guarantees, automatic USB flashing across all board revisions, firmware builds, remote SSH installation, face tracking, tested Freenove motor support, or arbitrary native Pi app execution. Uploaded/GitHub apps are static browser apps, not OS packages. Robot adapter HTTP is unencrypted: use only on a trusted isolated network, never expose robot or hub endpoints to the public internet.
 
 ## Build and verify
 
 Build on the matching native Linux architecture; cross-architecture AppImage builds are intentionally rejected:
 
 ```sh
-python3 -m pip install PyInstaller esptool pyserial
+python3 -m pip install PyInstaller esptool pyserial sounddevice
+sudo pacman -S portaudio       # Arch Linux build host
+sudo apt install libportaudio2 # Debian/Ubuntu build host
 scripts/build_appimage.sh x86_64    # x86_64 Linux
 scripts/build_appimage.sh aarch64   # ARM64 Linux
 ```

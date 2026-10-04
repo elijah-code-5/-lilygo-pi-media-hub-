@@ -15,6 +15,7 @@ pi-media-hub-setup = "pi_media_hub.setup:main"
 
 [project.optional-dependencies]
 firmware = ["esptool>=5,<6", "pyserial>=3.5"]
+desktop = ["esptool>=5,<6", "pyserial>=3.5", "sounddevice>=0.5,<1"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
