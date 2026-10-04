@@ -37,7 +37,7 @@ mkdir -p "$appdir/usr/bin" "$appdir/usr/share/pi-media-hub"
 (
   cd "$root"
   python3 -m PyInstaller --noconfirm --clean --onefile \
-    --name pi-media-hub-setup \
+    --name pi-media-hub \
     --add-data "$root/src/pi_media_hub:pi_media_hub" \
     --add-data "$root/config.example.json:share/pi-media-hub" \
     --paths "$root/src" \
@@ -46,26 +46,26 @@ mkdir -p "$appdir/usr/bin" "$appdir/usr/share/pi-media-hub"
     --workpath "$work/build" \
     tools/setup_appimage.py
 )
-cp "$work/dist/pi-media-hub-setup" "$appdir/usr/bin/pi-media-hub-setup"
+cp "$work/dist/pi-media-hub" "$appdir/usr/bin/pi-media-hub"
 cp config.example.json "$appdir/usr/share/pi-media-hub/config.example.json"
 cat > "$appdir/AppRun" <<'EOF'
 #!/usr/bin/env sh
 HERE="$(dirname "$(readlink -f "$0")")"
-exec "$HERE/usr/bin/pi-media-hub-setup" "$@"
+exec "$HERE/usr/bin/pi-media-hub" "$@"
 EOF
-cat > "$appdir/pi-media-hub-setup.desktop" <<'EOF'
+cat > "$appdir/pi-media-hub.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
-Name=Pi Media Hub Setup
-Comment=Install Pi Media Hub on a Linux host
-Exec=pi-media-hub-setup
+Name=Pi Media Hub
+Comment=Connect to and control a Pi Media Hub
+Exec=pi-media-hub
 Icon=pi-media-hub
 Categories=Utility;
-Terminal=true
+Terminal=false
 EOF
 printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8ioAAAAASUVORK5CYII=' | base64 -d > "$appdir/pi-media-hub.png"
-chmod +x "$appdir/AppRun" "$appdir/usr/bin/pi-media-hub-setup"
-output="$root/dist/pi-media-hub-setup-${target}.AppImage"
+chmod +x "$appdir/AppRun" "$appdir/usr/bin/pi-media-hub"
+output="$root/dist/pi-media-hub-${target}.AppImage"
 mkdir -p "$root/dist"
 ARCH="$target" APPIMAGE_EXTRACT_AND_RUN=1 "$appimagetool_bin" "$appdir" "$output"
 echo "Created $output"

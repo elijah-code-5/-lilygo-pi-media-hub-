@@ -12,6 +12,16 @@ from urllib.parse import quote
 
 from pi_media_hub.server import MediaHubServer, load_config
 from pi_media_hub.setup import main as setup_main
+from pi_media_hub.gui import normalize_server_url
+
+
+class GuiTests(unittest.TestCase):
+    def test_server_address_normalization(self):
+        self.assertEqual(normalize_server_url(" http://pi.local:8765/ "), "http://pi.local:8765")
+        for invalid in ("pi.local:8765", "ftp://pi.local", "http://user@pi.local", "http://pi.local/path"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    normalize_server_url(invalid)
 
 
 class ServerTests(unittest.TestCase):

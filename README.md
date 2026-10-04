@@ -1,6 +1,19 @@
 # Pi Media Hub
 
-A small, self-hosted media server for a Raspberry Pi 5 (4 GB) with a MicroPython Wi-Fi status/menu client for a LilyGO T-HMI ESP32-S3. This is an initial MVP, not a complete media center: playback happens in a browser or another client using the stream URL; the ESP32 lists library entries but does not decode media.
+A small media server for a Raspberry Pi 5 (4 GB), a desktop controller for Linux x86_64/ARM64, and a MicroPython Wi-Fi status/menu client for a LilyGO T-HMI ESP32-S3. This is an initial MVP, not a complete media center: playback happens in a browser or another client using the stream URL; the ESP32 lists library entries but does not decode media.
+
+## Desktop AppImage (Arch laptop controller)
+
+Download `pi-media-hub-x86_64.AppImage` from the x86_64 artifact of the latest successful [CI run](https://github.com/elijah-code-5/-lilygo-pi-media-hub-/actions). In Arch's file manager, mark it executable in Properties and open it; or launch from a terminal with:
+
+```sh
+chmod +x ~/Downloads/pi-media-hub-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ~/Downloads/pi-media-hub-x86_64.AppImage
+```
+
+This opens a GUI controller. Enter the Pi server URL (for example `http://raspberrypi.local:8765` or `http://<pi-lan-ip>:8765`) and choose **Connect**. The Library tab lists media, App catalog shows configured entries, and Local AI accepts a JSON request in the backend's expected format. The Pi server must already be running and reachable; this controller does not silently install a server over SSH. If the AppImage reports a FUSE error, `APPIMAGE_EXTRACT_AND_RUN=1` is the documented fallback. The GUI requires a graphical desktop session.
+
+On ARM64 Linux, `pi-media-hub-aarch64.AppImage` opens the same controller plus a **Start local server** panel. This runs the server from the selected directory while the GUI remains open; closing the window stops that in-app server. For a persistent boot service, use the Pi systemd setup below. Server access stays LAN-only/private-network-filtered by default.
 
 ## Run the server
 
@@ -27,12 +40,12 @@ Podcast files are audio files under a directory named `Podcasts` (case-insensiti
 
 ## Raspberry Pi installation
 
-On the Pi, install Python 3 and systemd, create a media directory, and run the installer as an account allowed to write `/opt`, `/etc`, and the systemd unit directory:
+On the Pi, install Python 3 and systemd, create a media directory, and run the setup CLI as an account allowed to write `/opt`, `/etc`, and the systemd unit directory. The AppImage itself launches the desktop controller by default; `install` is an explicit CLI maintenance command:
 
 ```sh
 sudo mkdir -p /srv/media
 sudo chown "$USER":"$USER" /srv/media
-sudo ./pi-media-hub-setup-aarch64.AppImage install --media-root /srv/media --service-user "$USER"
+sudo env APPIMAGE_EXTRACT_AND_RUN=1 ./pi-media-hub-aarch64.AppImage install --media-root /srv/media --service-user "$USER"
 sudoedit /etc/pi-media-hub/config.json
 sudo systemctl daemon-reload
 sudo systemctl enable --now pi-media-hub
@@ -44,7 +57,7 @@ The setup utility copies the Python server to `/opt/pi-media-hub`, keeps an exis
 
 If an older install's journal says `No module named pi_media_hub.__main__`, update the installed package and service using the replacement AppImage. As a temporary service-only workaround, write a systemd drop-in that replaces `ExecStart` with `/usr/bin/python3 -m pi_media_hub.server --config /etc/pi-media-hub/config.json`, then run `sudo systemctl daemon-reload` and `sudo systemctl restart pi-media-hub`.
 
-## AppImages
+## Building AppImages
 
 AppImages are Linux host setup utilities, **not ESP32 firmware**. Build a separate native image for each target:
 
@@ -55,7 +68,7 @@ scripts/build_appimage.sh x86_64   # on x86_64 Linux
 scripts/build_appimage.sh aarch64  # on ARM64 Linux (e.g. Raspberry Pi OS 64-bit)
 ```
 
-The build intentionally refuses cross-architecture builds. The AppImage packages the setup CLI; the installed server uses the host's `/usr/bin/python3`. CI builds x86_64 and ARM64 images on native runners. AppImage execution can require FUSE; on systems without it, use the AppImage's supported extract-and-run mode or install from a source checkout with `python3 -m pi_media_hub.setup install`.
+The build intentionally refuses cross-architecture builds. Each AppImage bundles the desktop controller and setup CLI; the persistent systemd service uses the host's `/usr/bin/python3`. CI builds x86_64 and ARM64 images on native runners. AppImage execution can require FUSE; on systems without it, use the AppImage's supported extract-and-run mode. The GUI supports connection to an already-running server; it does not perform remote SSH installation or flash ESP32 firmware.
 
 ## T-HMI MicroPython client
 

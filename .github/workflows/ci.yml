@@ -45,5 +45,5 @@ jobs:
         run: scripts/build_appimage.sh "${{ matrix.arch }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: pi-media-hub-setup-${{ matrix.arch }}
+          name: pi-media-hub-${{ matrix.arch }}
           path: dist/*.AppImage
